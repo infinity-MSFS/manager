@@ -1,0 +1,19 @@
+[package]
+name = "infinity-sim-watch"
+description = "simple crate that detects whether Microsoft Flight Simulator is running"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

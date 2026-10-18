@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Infinity Manager</title>
+        <link rel="icon" type="image/svg+xml" href="/infinity.svg" />
+
+        <link data-trunk rel="tailwind-css" href="input.css" />
+        <link
+            data-trunk
+            rel="rust"
+            data-wasm-opt="z"
+            data-wasm-opt-params="--enable-bulk-memory-opt --enable-nontrapping-float-to-int"
+        />
+        <link data-trunk rel="copy-dir" href="public" data-target-path="." />
+    </head>
+    <body></body>
+</html>

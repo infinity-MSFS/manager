@@ -1,0 +1,28 @@
+[package]
+name = "infinity-manager"
+description = "Infinity Manager, community edition."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "infinity-manager"
+path = "src/main.rs"
+
+[dependencies]
+infinity-app = { workspace = true }
+infinity-providers = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+tauri-build = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "infinity-auth"
+description = "OAuth 2.0 authorization-code + PKCE identity provider for Infinity Manager. Public client only"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-providers = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+
+[lints]
+workspace = true

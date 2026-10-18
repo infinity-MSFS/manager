@@ -1,0 +1,28 @@
+[package]
+name = "infinity-app"
+description = "The Infinity Manager desktop shell as a library: commands, state and lifecycle, assembled around a set of providers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-providers = { workspace = true }
+infinity-persistence = { workspace = true }
+infinity-sim-watch = { workspace = true }
+serde = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-deep-link = { workspace = true }
+tauri-plugin-opener = { workspace = true }
+tauri-plugin-single-instance = { workspace = true }
+tauri-plugin-window-state = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

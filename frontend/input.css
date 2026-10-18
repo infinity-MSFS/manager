@@ -1,0 +1,6 @@
+@import "./.generated/infinity-ui.css";
+@import "./.generated/app.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;

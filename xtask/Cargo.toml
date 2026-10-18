@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+description = "build orchestrator for the Infinity Manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,37 @@
+[package]
+name = "infinity-manager-ui"
+description = "The Infinity Manager ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "infinity-manager-ui"
+path = "src/main.rs"
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-ui = { workspace = true, features = ["csr"] }
+leptos = { workspace = true }
+leptos_router = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+serde = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+send_wrapper = { workspace = true }
+console_error_panic_hook = { workspace = true }
+
+[dependencies.web-sys]
+workspace = true
+features = ["Window", "Document", "HtmlElement", "console"]
+
+[lints]
+workspace = true

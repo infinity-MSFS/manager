@@ -1,0 +1,9 @@
+/target
+/frontend/dist
+/frontend/.generated
+/apps/desktop/gen
+*.pdb
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json

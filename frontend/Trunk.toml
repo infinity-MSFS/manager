@@ -1,0 +1,21 @@
+[build]
+target = "index.html"
+dist = "dist"
+filehash = true
+
+[tools]
+tailwindcss = "3.4.19"
+wasm_opt = "version_132"
+
+[[hooks]]
+stage = "pre_build"
+command = "cargo"
+command_arguments = ["xtask", "frontend", "prep"]
+
+[watch]
+watch = ["index.html", "src", "style", "input.css", "tailwind.config.js", "public", "../crates/ipc/src"]
+ignore = ["dist", ".generated"]
+
+[serve]
+port = 1420
+open = false
