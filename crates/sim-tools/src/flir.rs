@@ -2,8 +2,10 @@
 //!
 //! Wire protocol (`flir_stream`, the crate both ends use):
 //! - Gauge -> manager: bridge event `flir.state` (`StateReport`) about 15 Hz
-//!   while the HUD is up. `active: true` keeps the engine developing;
-//!   silence or `active: false` stops it.
+//!   while the HUD gauge is alive. `active: true` keeps the engine
+//!   developing; `active: false` stops it. Silence, `flir.goodbye` (sent as
+//!   the gauge is killed) or a long `active: false` takes the DLLs out of
+//!   the sim (`infinity_flir_engine::demand`).
 //! - Manager -> gauge: `flir.chunk` commands (`Chunk`), acked, one per piece
 //!   of a gray frame packed with the delta + deflate codec.
 //!
@@ -18,12 +20,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use flir_stream::{CHUNK_CHARS, CHUNK_COMMAND, Codec, STATE_EVENT, StateReport};
+use flir_stream::{
+    CHUNK_CHARS, CHUNK_COMMAND, Codec, GOODBYE_EVENT, Goodbye, STATE_EVENT, StateReport,
+};
 use infinity_bridge::{BridgeKind, BridgeManager, BridgeSpec};
 use infinity_flir_engine::FlirEngine;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast::error::RecvError;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Must match the relay in `10-systems/coherent/bridge/Main.res`.
 const PORT: u16 = 9878;
@@ -57,10 +61,14 @@ pub(crate) fn serve(engine: &FlirEngine, bridges: &BridgeManager) {
                 match rx.recv().await {
                     Ok(evt) if evt.name == STATE_EVENT => {
                         match serde_json::from_value::<StateReport>(evt.data) {
-                            Ok(report) if report.active => engine.request(report),
-                            Ok(_) => engine.withdraw(),
+                            Ok(report) => engine.report(report),
                             Err(e) => debug!(error = %e, "flir: bad state report"),
                         }
+                    }
+                    Ok(evt) if evt.name == GOODBYE_EVENT => {
+                        let bye = serde_json::from_value::<Goodbye>(evt.data).unwrap_or_default();
+                        info!(source = %bye.source, "flir: gauge said goodbye");
+                        engine.goodbye(&bye.source);
                     }
                     Ok(_) => {}
                     Err(RecvError::Lagged(n)) => warn!(dropped = n, "flir handler lagged"),

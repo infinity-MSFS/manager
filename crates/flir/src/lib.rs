@@ -15,25 +15,38 @@
 //! collimated, so that is the picture behind the combiner wherever the crew
 //! look: no camera tracking, no projection model.
 //!
-//! The engine is demand-driven: it attaches, injects and develops only while
-//! a gauge keeps asking ([`FlirEngine::request`], refreshed by every state
-//! report); a request older than [`REQUEST_TTL`] lapses and the stream
-//! stops. The injected DLLs stay in the sim until [`FlirEngine::unload`] (or
-//! the sim exits): re-injecting is not a restart (the core initialises once
-//! per process), so stopping only stops the stream.
+//! The engine is demand-driven ([`demand`]): it attaches, injects and
+//! develops only while a HUD gauge asks, and takes the DLLs back out of the
+//! sim a while after the last gauge says goodbye (the flight ending), when
+//! the gauges go quiet, or when the FLIR has gone unused for a while. A
+//! restarted flight is not unloaded: the core recreates the nose view the
+//! reload took, and the HUD picks the stream back up.
+//!
+//! Injection is by the sim's actual state, never by whether a channel opens
+//! (a named mapping outlives the DLL that made it): a module already loaded
+//! is reused only if it is the exact build this manager would inject, and
+//! is otherwise swapped. What is injected is a private copy ([`shadow`]), so
+//! neither the installed DLLs nor a developer's build output is ever locked
+//! by the sim; a rebuild on disk is picked up by swapping the copies.
+//!
+//! Unloading is ordered and confirmed: stream stopped, core asked to erase
+//! its view and unload, its module seen gone, then the bridge, likewise.
 //!
 //! The engine thread ends when the last [`FlirEngine`] handle is dropped.
 
+pub mod demand;
 pub mod dlls;
 pub mod env;
 mod error;
 pub mod settings;
+pub mod shadow;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
+use demand::{Demand, Release, nose_patience};
 use flir_stream::{Frame, StateReport};
 use infinity_sim_tools_ipc::flir::{FlirDiag, FlirPreview, FlirSettings, FlirState};
 use tokio::sync::watch;
@@ -41,28 +54,26 @@ use tracing::info;
 
 pub use error::{FlirError, Result};
 
-/// A request lapses this long after the last state report.
-pub const REQUEST_TTL: Duration = Duration::from_secs(2);
+pub use demand::REQUEST_TTL;
 /// Smallest frame the engine makes.
 pub const MIN_SIZE: u32 = 64;
 /// The gauge's ink, for tinting the preview like the HUD draws it.
 pub const INK: [u8; 3] = [70, 255, 110];
 
-struct Request {
-    report: StateReport,
-    at: Instant,
-}
-
 #[derive(Default)]
 struct Control {
-    request: Option<Request>,
+    demand: Demand,
     unload: bool,
     shutdown: bool,
+    /// Completed unloads, for [`FlirEngine::unload_and_wait`].
+    unloads: u64,
 }
 
 struct Shared {
     control: Mutex<Control>,
     wake: Condvar,
+    /// Signalled after every unload.
+    unloaded: Condvar,
     settings: Mutex<FlirSettings>,
     diag: Mutex<FlirDiag>,
     preview: Mutex<Option<Arc<Frame>>>,
@@ -113,6 +124,7 @@ impl FlirEngine {
         let shared = Arc::new(Shared {
             control: Mutex::new(Control::default()),
             wake: Condvar::new(),
+            unloaded: Condvar::new(),
             settings: Mutex::new(settings),
             diag: Mutex::new(FlirDiag {
                 camera: "-".into(),
@@ -139,28 +151,49 @@ impl FlirEngine {
         }
     }
 
-    /// A gauge wants a picture (refresh on every state report).
-    pub fn request(&self, report: StateReport) {
-        lock(&self.shared.control).request = Some(Request {
-            report,
-            at: Instant::now(),
-        });
+    /// A gauge's state report (about 15 Hz while it is alive), wanting a
+    /// picture or not.
+    pub fn report(&self, report: StateReport) {
+        lock(&self.shared.control)
+            .demand
+            .report(report, Instant::now());
         self.shared.wake.notify_all();
     }
 
-    /// The gauge stopped asking (`active: false`).
-    pub fn withdraw(&self) {
-        lock(&self.shared.control).request = None;
+    /// A gauge is being killed. The last one leaving unloads the DLLs.
+    pub fn goodbye(&self, source: &str) {
+        lock(&self.shared.control)
+            .demand
+            .goodbye(source, Instant::now());
         self.shared.wake.notify_all();
     }
 
-    /// Stops, then tears the nose view and the bridge out of the sim.
+    /// Stops, then takes the nose view and the bridge out of the sim.
     pub fn unload(&self) {
-        let mut c = lock(&self.shared.control);
-        c.request = None;
-        c.unload = true;
-        drop(c);
+        lock(&self.shared.control).unload = true;
         self.shared.wake.notify_all();
+    }
+
+    /// [`unload`](Self::unload), waiting up to `timeout` for it to finish.
+    /// For the manager exiting: true if the DLLs are out (or never were).
+    pub fn unload_and_wait(&self, timeout: Duration) -> bool {
+        let mut c = lock(&self.shared.control);
+        let before = c.unloads;
+        c.unload = true;
+        self.shared.wake.notify_all();
+        let deadline = Instant::now() + timeout;
+        while c.unloads == before {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() || c.shutdown {
+                return false;
+            }
+            c = self
+                .shared
+                .unloaded
+                .wait_timeout(c, left)
+                .map_or_else(|e| e.into_inner().0, |(g, _)| g);
+        }
+        true
     }
 
     /// The latest developed frame (latest wins).
@@ -291,10 +324,10 @@ mod worker {
     use infinity_viewports_host::geo::aircraft_pose;
     use infinity_viewports_host::simvars::AircraftFeed;
     use infinity_viewports_host::video::VideoReader;
-    use infinity_viewports_host::{Host, HostConfig, Sim, SimTarget};
+    use infinity_viewports_host::{Host, HostConfig, Sim, SimTarget, locate};
     use infinity_viewports_protocol::{
         APPLIED_FOLLOW, APPLIED_MISSING, APPLIED_PARENTED, APPLIED_PLACED, AircraftPose,
-        CameraControl, MOUNT_AIRCRAFT,
+        CameraControl, MOUNT_AIRCRAFT, NOSE_CREATING, NOSE_LIVE, NOSE_REACQUIRING, NOSE_STOPPED,
     };
     use tracing::warn;
 
@@ -307,6 +340,11 @@ mod worker {
     const IDLE_POLL: Duration = Duration::from_millis(500);
     const FEET_TO_M: f64 = 0.3048;
 
+    /// How long to wait for a torn-down DLL to leave the sim.
+    const UNLOAD_WAIT: Duration = Duration::from_secs(4);
+    /// How often a running session checks the DLLs on disk for a rebuild.
+    const REBUILD_CHECK: Duration = Duration::from_secs(2);
+
     struct Session {
         sim: Sim,
         camera: Option<CameraLink>,
@@ -314,6 +352,13 @@ mod worker {
         streaming: bool,
         heartbeat: u64,
         heartbeat_at: Instant,
+        /// When the DLLs went in (the demand clock starts here).
+        since: Instant,
+        /// The DLLs the copies were made from, as they were then.
+        sources: Vec<(PathBuf, Option<shadow::Stamp>)>,
+        next_rebuild_check: Instant,
+        /// Since when the core has reported its nose view not live.
+        nose_down_since: Option<Instant>,
     }
 
     struct Worker<'a> {
@@ -326,6 +371,8 @@ mod worker {
         next_frame: Instant,
         seq: u64,
         fps_window: (Instant, u32),
+        /// Re-injections for a lost nose view that did not bring it back.
+        nose_resets: u32,
     }
 
     pub(super) fn run(shared: &Shared, tx: &watch::Sender<Option<Arc<Frame>>>) {
@@ -339,12 +386,37 @@ mod worker {
             next_frame: Instant::now(),
             seq: first_seq(),
             fps_window: (Instant::now(), 0),
+            nose_resets: 0,
         };
         while !shared.stopping() {
             w.step();
         }
+        // Dropped without an unload (the manager going down without its
+        // exit hook): at least stop the stream.
         w.stop_stream();
         info!("flir: engine stopped");
+    }
+
+    /// Waits up to [`UNLOAD_WAIT`] for `name` to leave `pid`. True once it
+    /// has (or the sim is gone).
+    fn wait_gone(pid: u32, name: &str) -> bool {
+        let deadline = Instant::now() + UNLOAD_WAIT;
+        loop {
+            match locate::loaded_module(pid, name) {
+                Ok(None) | Err(_) => return true,
+                Ok(Some(_)) if Instant::now() >= deadline => return false,
+                Ok(Some(_)) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// Whether two paths name the same file (the loader reports its own
+    /// spelling of a path).
+    fn same_file(a: &Path, b: &Path) -> bool {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
     }
 
     impl Worker<'_> {
@@ -354,45 +426,175 @@ mod worker {
             d.error = error;
         }
 
-        /// The live request, if any (lapsing a stale one), and whether an
-        /// unload was asked for.
-        fn current(&self) -> (Option<StateReport>, bool) {
-            let mut c = lock(&self.shared.control);
-            let unload = std::mem::take(&mut c.unload);
-            if c.request
-                .as_ref()
-                .is_some_and(|r| r.at.elapsed() > REQUEST_TTL)
-            {
-                c.request = None;
-            }
-            (c.request.as_ref().map(|r| r.report.clone()), unload)
-        }
-
         fn step(&mut self) {
-            let (request, unload) = self.current();
-            if unload {
-                self.unload();
+            let now = Instant::now();
+            let (request, release, sources) = {
+                let mut c = lock(&self.shared.control);
+                let asked = std::mem::take(&mut c.unload);
+                let since = self.session.as_ref().map_or(now, |s| s.since);
+                // Evaluated even with nothing injected, so a farewell is
+                // consumed rather than left to fire after the next inject.
+                let due = c.demand.release_due(since, now);
+                let release = if asked {
+                    Some(Release::Asked)
+                } else {
+                    due.filter(|_| self.session.is_some())
+                };
+                (c.demand.request(now), release, c.demand.sources(now))
+            };
+            {
+                let mut d = lock(&self.shared.diag);
+                d.requested = request.is_some();
+                d.sources = sources;
             }
-            lock(&self.shared.diag).requested = request.is_some();
+            if let Some(reason) = release {
+                self.release(reason);
+                lock(&self.shared.control).unloads += 1;
+                self.shared.unloaded.notify_all();
+                return;
+            }
             let Some(report) = request else {
                 self.stop_stream();
-                // Nothing to do: sleep until a request (or poll the TTL).
+                // Nothing to develop: sleep until a report, an unload or the
+                // next look at the release clock.
                 let c = lock(&self.shared.control);
-                let _ = self.shared.wake.wait_timeout_while(c, IDLE_POLL, |c| {
-                    c.request.is_none() && !c.unload && !c.shutdown
-                });
+                let _ = self
+                    .shared
+                    .wake
+                    .wait_timeout_while(c, IDLE_POLL, |c| !c.unload && !c.shutdown);
                 return;
             };
             if self.session.is_none() && !self.attach() {
                 std::thread::sleep(Duration::from_millis(200));
                 return;
             }
+            if self.rebuilt() {
+                self.release(Release::Rebuilt);
+                return;
+            }
             self.tick(&report);
             std::thread::sleep(TICK);
         }
 
-        /// Attaches (or reconnects) to the sim, injects the nose view and
-        /// starts the stream. False while it cannot (retried every few
+        /// The DLLs the running copies came from changed on disk.
+        fn rebuilt(&mut self) -> bool {
+            let Some(s) = self.session.as_mut() else {
+                return false;
+            };
+            if Instant::now() < s.next_rebuild_check {
+                return false;
+            }
+            s.next_rebuild_check = Instant::now() + REBUILD_CHECK;
+            s.sources
+                .iter()
+                .any(|(path, was)| shadow::stamp(path) != *was)
+        }
+
+        /// The sim's pid, if it is running.
+        fn sim_pid(&self) -> Option<u32> {
+            self.session
+                .as_ref()
+                .map(|s| s.sim.pid())
+                .or_else(|| locate::select(None).ok().map(|p| p.pid))
+        }
+
+        /// Takes the nose view and the bridge out of the sim, in order, and
+        /// confirms each is gone. Also clears out DLLs an earlier manager
+        /// left behind.
+        fn release(&mut self, reason: Release) {
+            let pid = self.sim_pid();
+            let session = self.session.take();
+            {
+                let mut d = lock(&self.shared.diag);
+                d.state = FlirState::Releasing;
+                d.requested = false;
+            }
+            let Some(pid) = pid else {
+                self.released(reason, "the sim is not running");
+                return;
+            };
+            let core_in = matches!(locate::loaded_module(pid, dlls::CORE_DLL), Ok(Some(_)));
+            let bridge_in = matches!(locate::loaded_module(pid, dlls::BRIDGE_DLL), Ok(Some(_)));
+            if !core_in && !bridge_in {
+                self.released(reason, "nothing was loaded");
+                return;
+            }
+            // The session's link, or a fresh one to DLLs it does not own.
+            let sim = match session {
+                Some(s) => {
+                    let Session {
+                        sim,
+                        camera,
+                        reader,
+                        streaming,
+                        ..
+                    } = s;
+                    drop((camera, reader));
+                    if streaming {
+                        let _ = sim.stop_stream();
+                    }
+                    Some(sim)
+                }
+                None if bridge_in => Host::new(HostConfig {
+                    bridge_path: PathBuf::new(),
+                    bridge_sha256: None,
+                    sim_path: None,
+                })
+                .and_then(|h| h.connect(SimTarget::Pid(pid)))
+                .ok(),
+                None => None,
+            };
+
+            // The core first: it erases its view on the sim's update, then
+            // unloads. The bridge goes after, so nothing is left capturing a
+            // view that is still being drawn.
+            let core_gone = !core_in || {
+                let _ = infinity_viewports_host::signal_nose_teardown(pid);
+                wait_gone(pid, dlls::CORE_DLL)
+            };
+            let bridge_gone = !bridge_in || {
+                match &sim {
+                    Some(sim) => {
+                        let _ = sim.teardown_bridge();
+                    }
+                    None => warn!(
+                        "flir: the bridge is loaded but not answering; it stays until the sim exits"
+                    ),
+                }
+                // Our handles to its mappings go before the wait.
+                drop(sim);
+                wait_gone(pid, dlls::BRIDGE_DLL)
+            };
+            let outcome = match (core_gone, bridge_gone) {
+                (true, true) => "unloaded",
+                (false, true) => "the core did not unload",
+                (true, false) => "the bridge did not unload",
+                (false, false) => "neither DLL unloaded",
+            };
+            if !(core_gone && bridge_gone) {
+                warn!(pid, outcome, "flir: unload incomplete");
+            }
+            self.released(reason, outcome);
+        }
+
+        fn released(&mut self, reason: Release, outcome: &str) {
+            info!(reason = reason.describe(), outcome, "flir: released");
+            self.pipeline.reset();
+            self.next_attach = Instant::now();
+            *lock(&self.shared.preview) = None;
+            let mut d = lock(&self.shared.diag);
+            d.state = FlirState::Idle;
+            d.pid = None;
+            d.injected = false;
+            d.camera = "-".into();
+            d.stream_fps = 0.0;
+            d.nose.clear();
+            d.nose_losses = 0;
+            d.last_release = Some(format!("{}: {outcome}", reason.describe()));
+        }
+
+        /// Attaches to the sim and injects whatever of the two DLLs it lacks,
+        /// then starts the stream. False while it cannot (retried every few
         /// seconds).
         fn attach(&mut self) -> bool {
             if Instant::now() < self.next_attach {
@@ -410,7 +612,7 @@ mod worker {
                     dlls::resolve(configured(&settings.core_dll), dlls::CORE_DLL, dir)
                         .map(|c| (b, c))
                 });
-            let (bridge, core) = match paths {
+            let (bridge_src, core_src) = match paths {
                 Ok(p) => p,
                 Err(e) => {
                     self.set_state(FlirState::Error, Some(e));
@@ -419,11 +621,41 @@ mod worker {
             };
             {
                 let mut d = lock(&self.shared.diag);
-                d.bridge_dll = Some(bridge.display().to_string());
-                d.core_dll = Some(core.display().to_string());
+                d.bridge_dll = Some(bridge_src.display().to_string());
+                d.core_dll = Some(core_src.display().to_string());
             }
+            let Ok(proc) = locate::select(None) else {
+                self.set_state(FlirState::Attaching, Some("waiting for the sim".into()));
+                return false;
+            };
+            let pid = proc.pid;
+
+            let root = shadow::root(dir);
+            let staged = shadow::stage(&bridge_src, &root)
+                .and_then(|b| shadow::stage(&core_src, &root).map(|c| (b, c)));
+            let (bridge, core) = match staged {
+                Ok(p) => p,
+                Err(e) => {
+                    self.set_state(FlirState::Error, Some(format!("copy the DLLs: {e}")));
+                    return false;
+                }
+            };
+
+            // Whatever is in the sim must be this build, or come out first.
+            let loaded = |name: &str| locate::loaded_module(pid, name).ok().flatten();
+            let (bridge_in, core_in) = (loaded(dlls::BRIDGE_DLL), loaded(dlls::CORE_DLL));
+            let foreign = bridge_in.as_deref().is_some_and(|p| !same_file(p, &bridge))
+                || core_in.as_deref().is_some_and(|p| !same_file(p, &core));
+            if foreign {
+                info!(pid, "flir: a different build is in the sim; swapping it");
+                self.release(Release::Rebuilt);
+                // Straight back here on the next step.
+                self.next_attach = Instant::now();
+                return false;
+            }
+
             let host = match Host::new(HostConfig {
-                bridge_path: bridge,
+                bridge_path: bridge.clone(),
                 bridge_sha256: None,
                 sim_path: None,
             }) {
@@ -433,21 +665,24 @@ mod worker {
                     return false;
                 }
             };
-            // A bridge already in the sim (an earlier session) is re-used;
-            // otherwise inject it.
-            let sim = match host
-                .connect(SimTarget::Auto)
-                .or_else(|_| host.attach(SimTarget::Auto))
-            {
+            let sim = if bridge_in.is_some() {
+                host.connect(SimTarget::Pid(pid))
+            } else {
+                host.attach(SimTarget::Pid(pid))
+            };
+            let sim = match sim {
                 Ok(s) => s,
                 Err(e) => {
                     self.set_state(FlirState::Error, Some(format!("attach: {e}")));
                     return false;
                 }
             };
-            // The core DLL creates the nose view. LoadLibrary of a module
-            // already loaded is a refcount bump, so this is safe to repeat.
-            if let Err(e) = infinity_viewports_host::inject::inject(sim.pid(), &core) {
+            // Only when absent: a second LoadLibrary of a loaded module is a
+            // refcount bump, and the teardown's one FreeLibrary would then
+            // leave it loaded and unhooked.
+            if core_in.is_none()
+                && let Err(e) = infinity_viewports_host::inject::inject(pid, &core)
+            {
                 self.set_state(FlirState::Error, Some(format!("inject core: {e}")));
                 return false;
             }
@@ -455,17 +690,38 @@ mod worker {
             if let Err(e) = sim.set_stream_source(COLOR_FORMAT, 0) {
                 warn!(error = %e, "flir: set_stream_source failed");
             }
-            let pid = sim.pid();
-            info!(pid, "flir: attached to the sim, nose view injected");
-            lock(&self.shared.diag).pid = Some(pid);
+            info!(
+                pid,
+                reused = bridge_in.is_some(),
+                bridge = %bridge.display(),
+                core = %core.display(),
+                "flir: attached to the sim, nose view injected"
+            );
+            shadow::sweep(&root, &[&bridge, &core]);
+            {
+                let mut d = lock(&self.shared.diag);
+                d.pid = Some(pid);
+                d.injected = true;
+            }
             self.pipeline.reset();
+            let now = Instant::now();
             self.session = Some(Session {
                 sim,
                 camera: None,
                 reader: None,
                 streaming: false,
                 heartbeat: 0,
-                heartbeat_at: Instant::now(),
+                heartbeat_at: now,
+                since: now,
+                sources: [bridge_src, core_src]
+                    .into_iter()
+                    .map(|p| {
+                        let st = shadow::stamp(&p);
+                        (p, st)
+                    })
+                    .collect(),
+                next_rebuild_check: now + REBUILD_CHECK,
+                nose_down_since: None,
             });
             self.set_state(FlirState::Running, None);
             true
@@ -483,18 +739,6 @@ mod worker {
             if d.state == FlirState::Running {
                 d.state = FlirState::Idle;
             }
-        }
-
-        fn unload(&mut self) {
-            if let Some(s) = self.session.take() {
-                let _ = s.sim.stop_stream();
-                let _ = s.sim.teardown_nose();
-                let _ = s.sim.teardown_bridge();
-                info!("flir: nose view and bridge torn down");
-            }
-            let mut d = lock(&self.shared.diag);
-            d.state = FlirState::Idle;
-            d.pid = None;
         }
 
         /// The SimConnect pose with the configured sign corrections.
@@ -531,6 +775,7 @@ mod worker {
                 pitch_deg: c.pitch_deg,
                 roll_deg: 0.0,
                 fov_deg: c.fov_deg,
+                near_m: c.near_m,
                 ..CameraControl::stock()
             }
             .sanitized()
@@ -555,9 +800,10 @@ mod worker {
                 lock(&self.shared.diag).stream_fps = st.fps;
             }
             if s.heartbeat_at.elapsed() > HEARTBEAT_LOST {
-                warn!("flir: bridge heartbeat lost; re-attaching");
-                self.session = None;
-                self.set_state(FlirState::Attaching, Some("bridge heartbeat lost".into()));
+                // The sim exited (nothing to unload), or the bridge hung:
+                // take it out so the next attach injects a working one.
+                warn!("flir: bridge heartbeat lost; releasing");
+                self.release(Release::Stalled);
                 return;
             }
 
@@ -580,12 +826,14 @@ mod worker {
                 s.camera = s.sim.camera().ok();
             }
             let mut camera_label = None;
+            let mut nose = None;
             if let Some(cam) = &s.camera {
                 let _ = cam.write_control(Self::control(&settings));
                 if pose.valid != 0 {
                     let _ = cam.write_pose(pose);
                 }
                 if let Ok(st) = cam.read_status() {
+                    nose = Some((st.nose, st.nose_losses));
                     let applied = match st.applied {
                         APPLIED_FOLLOW => "follow",
                         APPLIED_PLACED => "placed",
@@ -612,6 +860,50 @@ mod worker {
                 if let Some((a, n)) = camera_label {
                     d.camera = a;
                     d.camera_note = n;
+                }
+                if let Some((state, losses)) = nose {
+                    d.nose = match state {
+                        NOSE_CREATING => "creating",
+                        NOSE_LIVE => "live",
+                        NOSE_REACQUIRING => "reacquiring",
+                        NOSE_STOPPED => "stopped",
+                        _ => "",
+                    }
+                    .into();
+                    d.nose_losses = u32::from(losses);
+                }
+            }
+
+            // The core gets a lost view back by itself; if it cannot, a
+            // fresh injection is the last resort. A core that stopped (torn
+            // down by someone else) will not make one at all.
+            if let Some((state, _)) = nose {
+                let now = Instant::now();
+                match state {
+                    NOSE_LIVE => {
+                        s.nose_down_since = None;
+                        self.nose_resets = 0;
+                    }
+                    NOSE_CREATING | NOSE_REACQUIRING | NOSE_STOPPED => {
+                        let down = *s.nose_down_since.get_or_insert(now);
+                        let patience = if state == NOSE_STOPPED {
+                            Duration::ZERO
+                        } else {
+                            nose_patience(self.nose_resets)
+                        };
+                        if now.duration_since(down) > patience {
+                            warn!(
+                                state,
+                                down_s = now.duration_since(down).as_secs(),
+                                "flir: the nose view is not coming back; re-injecting"
+                            );
+                            self.nose_resets = self.nose_resets.saturating_add(1);
+                            self.release(Release::NoseLost);
+                            return;
+                        }
+                    }
+                    // A core from before the nose report.
+                    _ => {}
                 }
             }
 

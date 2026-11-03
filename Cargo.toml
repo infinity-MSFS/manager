@@ -155,6 +155,30 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# The sister repos (infinity-flir, -terrain-radar, -viewports) are built as
+# release even in dev builds: their per-pixel and per-tile work runs ~5-10x
+# slower unoptimized, too slow to judge the FLIR or the radar in a dev build.
+[profile.dev.package.flir-env]
+opt-level = 3
+[profile.dev.package.flir-pipeline]
+opt-level = 3
+[profile.dev.package.flir-scene]
+opt-level = 3
+[profile.dev.package.flir-sensor]
+opt-level = 3
+[profile.dev.package.flir-stream]
+opt-level = 3
+[profile.dev.package.flir-types]
+opt-level = 3
+[profile.dev.package.infinity-terrain-radar]
+opt-level = 3
+[profile.dev.package.itr-format]
+opt-level = 3
+[profile.dev.package.infinity-viewports-host]
+opt-level = 3
+[profile.dev.package.infinity-viewports-protocol]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

@@ -2721,6 +2721,7 @@ dependencies = [
  "infinity-viewports-protocol",
  "png 0.18.1",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

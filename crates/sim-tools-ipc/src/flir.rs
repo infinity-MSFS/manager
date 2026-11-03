@@ -9,6 +9,8 @@ pub enum FlirState {
     Idle,
     Attaching,
     Running,
+    /// Taking the DLLs out of the sim.
+    Releasing,
     Error,
     /// The nose camera needs Windows.
     Unsupported,
@@ -45,6 +47,23 @@ pub struct FlirDiag {
     pub pose: bool,
     pub pose_error: Option<String>,
     pub last_seq: u64,
+    /// The DLLs are in the sim.
+    #[serde(default)]
+    pub injected: bool,
+    /// The gauges reporting right now (e.g. `md-hud-capt`).
+    #[serde(default)]
+    pub sources: Vec<String>,
+    /// Why and how the DLLs last came out.
+    #[serde(default)]
+    pub last_release: Option<String>,
+    /// The core's nose view: `creating`, `live`, `reacquiring`, `stopped`,
+    /// or empty before the core reports it.
+    #[serde(default)]
+    pub nose: String,
+    /// Times the sim took the nose view away and the core made a new one,
+    /// this injection.
+    #[serde(default)]
+    pub nose_losses: u32,
 }
 
 /// Where the nose camera sits and points, relative to the aircraft's
@@ -61,6 +80,10 @@ pub struct NoseCamera {
     pub yaw_deg: f32,
     /// Vertical field of view, degrees.
     pub fov_deg: f32,
+    /// Near clip plane, metres: nothing closer to the lens is drawn, so the
+    /// aircraft's own nose drops out of the picture. 0 keeps the sim's.
+    #[serde(default)]
+    pub near_m: f32,
 }
 
 /// The sensor look.

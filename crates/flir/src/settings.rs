@@ -27,6 +27,7 @@ pub fn default_camera() -> NoseCamera {
         pitch_deg: -3.9,
         yaw_deg: 0.0,
         fov_deg: 27.8,
+        near_m: 0.0,
     }
 }
 
@@ -54,11 +55,12 @@ pub fn defaults() -> FlirSettings {
         sensor: default_look(),
         clouds: true,
         cloud_alt_m: 3000.0,
-        // MSFS reports pitch positive nose down; the pose builder wants up.
-        // TODO_DATA(pose-sign): fly a climb and a bank and confirm the
-        // picture holds still against the world.
+        // MSFS reports pitch positive nose down and bank positive left; the
+        // pose builder wants nose up and right wing down. Bank was flown in
+        // the MD-10: uninverted, the picture banked with the aircraft
+        // instead of holding the horizon.
         invert_pitch: true,
-        invert_bank: false,
+        invert_bank: true,
     }
 }
 
@@ -69,12 +71,13 @@ pub fn sanitized(mut s: FlirSettings) -> FlirSettings {
     s.max_fps = f(s.max_fps, 1.0, 30.0, d.max_fps);
     s.quant = s.quant.clamp(1, 16);
     let (c, dc) = (&mut s.camera, d.camera);
-    c.forward_m = f(c.forward_m, -200.0, 200.0, dc.forward_m);
-    c.up_m = f(c.up_m, -200.0, 200.0, dc.up_m);
-    c.right_m = f(c.right_m, -200.0, 200.0, dc.right_m);
+    c.forward_m = f(c.forward_m, -500.0, 500.0, dc.forward_m);
+    c.up_m = f(c.up_m, -500.0, 500.0, dc.up_m);
+    c.right_m = f(c.right_m, -500.0, 500.0, dc.right_m);
     c.pitch_deg = f(c.pitch_deg, -89.0, 89.0, dc.pitch_deg);
     c.yaw_deg = f(c.yaw_deg, -180.0, 180.0, dc.yaw_deg);
     c.fov_deg = f(c.fov_deg, 1.0, 140.0, dc.fov_deg);
+    c.near_m = f(c.near_m, 0.0, 20.0, dc.near_m);
     s.cloud_alt_m = f(s.cloud_alt_m, 0.0, 15_000.0, d.cloud_alt_m);
     let blank = |p: &mut Option<String>| {
         if p.as_deref().is_some_and(|v| v.trim().is_empty()) {

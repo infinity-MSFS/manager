@@ -1,7 +1,7 @@
 //! IPC contract of the `infinity-sim-tools` plugin: the terrain radar
 //! database, the MD-10 HUD's FLIR (nose camera) and the developer Perf page.
 //!
-//! Shared by the plugin (native) and the official UI (wasm32), so it holds
+//! Shared by the plugin (native) and the UI (wasm32), so it holds
 //! plain data only.
 
 pub mod flir;

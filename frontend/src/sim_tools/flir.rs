@@ -230,6 +230,7 @@ fn state_label(d: Option<&FlirDiag>) -> &'static str {
         Some(d) => match d.state {
             FlirState::Running => "Running",
             FlirState::Attaching => "Attaching to the sim...",
+            FlirState::Releasing => "Unloading from the sim...",
             FlirState::Error => "Error",
             FlirState::Unsupported => "Needs Windows",
             FlirState::Idle if d.requested => "Starting",
@@ -410,16 +411,41 @@ fn SliderRow(
     } else {
         0
     };
+    // What the box shows: follows the slider, but keeps a half-typed entry
+    // ("-", "12.") until it parses to a different number.
+    let draft = RwSignal::new(format!("{:.digits$}", value.get_untracked()));
+    Effect::new(move |_| {
+        let v = value.get();
+        let typed = draft.get_untracked().trim().parse::<f64>().ok();
+        if typed.is_none_or(|t| (t - v).abs() > step / 2.0) {
+            draft.set(format!("{v:.digits$}"));
+        }
+    });
+    let typed = Callback::new(move |s: String| {
+        draft.set(s.clone());
+        if let Ok(v) = s.trim().parse::<f64>()
+            && v.is_finite()
+        {
+            on_input.run(v.clamp(min, max));
+        }
+    });
     view! {
-        <label class="flex flex-col gap-1 py-1.5">
-            <span class="flex justify-between text-xs">
+        <div class="flex flex-col gap-1 py-1.5">
+            <span class="flex items-center justify-between gap-2 text-xs">
                 <span class="text-white/70">{label}</span>
-                <span class="font-mono tabular-nums text-white/90">
-                    {move || format!("{:.digits$}{unit}", value.get())}
+                <span class="flex items-center gap-1 font-mono tabular-nums text-white/90">
+                    <TextInput
+                        value=draft
+                        input_type="number"
+                        size=Size::Sm
+                        class="w-24 text-right"
+                        on_input=typed
+                    />
+                    <span class="w-6 text-white/60">{unit}</span>
                 </span>
             </span>
             <Slider value=value on_input=on_input min=min max=max step=step />
-        </label>
+        </div>
     }
 }
 
@@ -478,6 +504,19 @@ fn EngineCard(
                     .map(|e| view! { <Callout tone=Tone::Warning class="mb-3">{e}</Callout> })
             }}
             <Readout label="sim pid" value=text(|d| d.pid.map_or_else(|| "-".to_owned(), |p| p.to_string())) />
+            <Readout label="in the sim" value=text(|d| if d.injected { "injected".to_owned() } else { "not loaded".to_owned() }) />
+            <Readout
+                label="reporting HUDs"
+                value=text(|d| if d.sources.is_empty() { "none".to_owned() } else { d.sources.join(", ") })
+            />
+            <Readout label="last unload" value=text(|d| d.last_release.clone().unwrap_or_else(|| "-".to_owned())) />
+            <Readout
+                label="nose view"
+                value=text(|d| match d.nose_losses {
+                    0 => dash(&d.nose),
+                    n => format!("{} (lost {n}x this injection)", dash(&d.nose)),
+                })
+            />
             <Readout label="nose stream" value=text(|d| format!("{:.0} fps", d.stream_fps)) />
             <Readout label="frames developed" value=text(|d| d.frames_developed.to_string()) />
             <Readout label="camera note" value=text(|d| dash(&d.camera_note)) />
@@ -523,12 +562,16 @@ fn CameraCard(editor: Editor) -> impl IntoView {
             <p class="mb-2 text-[11px] leading-relaxed text-white/40">
                 "Mounted on the airframe, relative to the reference datum. Pitch and vertical FOV must match the HUD field (panel.cfg hud = 2, 0.0, 3.9, 27.8, 27.8) or conformal symbols drift off what they mark."
             </p>
-            {editor.slider("Forward", |s| s.camera.forward_m, |s, v| s.camera.forward_m = v, (-10.0, 60.0, 0.5), " m")}
-            {editor.slider("Up", |s| s.camera.up_m, |s, v| s.camera.up_m = v, (-10.0, 10.0, 0.1), " m")}
-            {editor.slider("Right", |s| s.camera.right_m, |s, v| s.camera.right_m = v, (-10.0, 10.0, 0.1), " m")}
-            {editor.slider("Pitch", |s| s.camera.pitch_deg, |s, v| s.camera.pitch_deg = v, (-20.0, 20.0, 0.1), "°")}
-            {editor.slider("Yaw", |s| s.camera.yaw_deg, |s, v| s.camera.yaw_deg = v, (-20.0, 20.0, 0.1), "°")}
-            {editor.slider("Vertical FOV", |s| s.camera.fov_deg, |s, v| s.camera.fov_deg = v, (10.0, 60.0, 0.1), "°")}
+            {editor.slider("Forward", |s| s.camera.forward_m, |s, v| s.camera.forward_m = v, (-500.0, 500.0, 0.1), " m")}
+            {editor.slider("Up", |s| s.camera.up_m, |s, v| s.camera.up_m = v, (-500.0, 500.0, 0.1), " m")}
+            {editor.slider("Right", |s| s.camera.right_m, |s, v| s.camera.right_m = v, (-500.0, 500.0, 0.1), " m")}
+            {editor.slider("Pitch", |s| s.camera.pitch_deg, |s, v| s.camera.pitch_deg = v, (-89.0, 89.0, 0.1), "°")}
+            {editor.slider("Yaw", |s| s.camera.yaw_deg, |s, v| s.camera.yaw_deg = v, (-180.0, 180.0, 0.1), "°")}
+            {editor.slider("Vertical FOV", |s| s.camera.fov_deg, |s, v| s.camera.fov_deg = v, (1.0, 140.0, 0.1), "°")}
+            {editor.slider("Near clip (0 = sim)", |s| s.camera.near_m, |s, v| s.camera.near_m = v, (0.0, 20.0, 0.05), " m")}
+            <p class="mb-2 text-[11px] leading-relaxed text-white/40">
+                "Nothing closer to the lens than the near clip is drawn: raise it until the aircraft's own nose leaves the picture."
+            </p>
             <div class="my-3 h-px bg-white/10"></div>
             {editor.toggle("Invert pose pitch (MSFS: + is nose down)", |s| s.invert_pitch, |s, v| s.invert_pitch = v)}
             {editor.toggle("Invert pose bank", |s| s.invert_bank, |s, v| s.invert_bank = v)}

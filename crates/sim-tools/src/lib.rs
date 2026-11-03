@@ -25,6 +25,10 @@ use tauri::plugin::TauriPlugin;
 use tauri::{AppHandle, Manager, RunEvent, State, Wry};
 use tokio::sync::broadcast::error::RecvError;
 
+/// The longest the manager's exit waits for the FLIR DLLs to leave the
+/// sim (two ordered unloads, each confirmed).
+const FLIR_EXIT_UNLOAD: std::time::Duration = std::time::Duration::from_secs(6);
+
 type Out<C> = IpcResult<<C as Command>::Output>;
 type Args<C> = <C as Command>::Args;
 
@@ -72,10 +76,18 @@ pub fn init(config: Config) -> TauriPlugin<Wry> {
             });
             Ok(())
         })
-        .on_event(|app, event| {
-            if let RunEvent::Ready = event {
-                start(app);
+        .on_event(|app, event| match event {
+            RunEvent::Ready => start(app),
+            // Leave nothing injected behind: the sim would keep rendering the
+            // nose view and hold the DLLs until it exits.
+            RunEvent::Exit => {
+                if let Some(state) = app.try_state::<SimTools>()
+                    && !state.flir.unload_and_wait(FLIR_EXIT_UNLOAD)
+                {
+                    tracing::warn!("flir: the DLLs did not leave the sim before exit");
+                }
             }
+            _ => {}
         })
         .build()
 }
