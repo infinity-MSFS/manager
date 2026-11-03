@@ -1,0 +1,26 @@
+[package]
+name = "infinity-terrain"
+description = "The custom terrain radar for the manager: the headless infinity-terrain-radar renderer on its own thread, and the database download."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-terrain-radar = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+tracing = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

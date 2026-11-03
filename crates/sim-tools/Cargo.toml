@@ -1,0 +1,31 @@
+[package]
+name = "infinity-sim-tools"
+description = "The infinity-sim-tools Tauri plugin : the custom terrain radar, the MD-10 HUD FLIR and the developer Perf page."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-sim-tools-ipc = { workspace = true }
+infinity-terrain = { workspace = true }
+infinity-flir-engine = { workspace = true }
+infinity-bridge = { workspace = true }
+infinity-installer = { workspace = true }
+infinity-ipc = { workspace = true }
+infinity-persistence = { workspace = true }
+flir-stream = { workspace = true }
+base64 = { workspace = true }
+futures-util = "0.3"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tauri = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

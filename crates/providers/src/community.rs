@@ -1,5 +1,7 @@
 use async_trait::async_trait;
-use infinity_ipc::catalog::{Catalog, OwnershipPolicy, PackageSpec, PresignArtifact, Product};
+use infinity_ipc::catalog::{
+    Catalog, ChangelogEntry, EfbDocMeta, OwnershipPolicy, PackageSpec, PresignArtifact, Product,
+};
 use infinity_ipc::dto::{Channel, SessionState};
 use infinity_ipc::{IpcError, IpcErrorCode, IpcResult};
 
@@ -43,11 +45,14 @@ fn no_accounts() -> IpcError {
 pub struct HttpContent {
     http: reqwest::Client,
     catalog_url: String,
+    changelog_url: Option<String>,
+    efb_docs_base: Option<url::Url>,
     artifact_base: Option<url::Url>,
 }
 
 impl HttpContent {
     pub const CHANNEL_PLACEHOLDER: &'static str = "{channel}";
+    pub const PRODUCT_PLACEHOLDER: &'static str = "{product}";
 
     pub fn new(catalog_url: impl Into<String>, artifact_base: Option<url::Url>) -> IpcResult<Self> {
         let catalog_url = catalog_url.into();
@@ -65,8 +70,32 @@ impl HttpContent {
         Ok(Self {
             http,
             catalog_url,
+            changelog_url: None,
+            efb_docs_base: None,
             artifact_base: artifact_base.map(with_trailing_slash),
         })
+    }
+
+    /// Serves published EFB documents from `<base>docs` (the list) and
+    /// `<base>doc/<id>` (a PDF).
+    pub fn with_efb_docs(mut self, base: url::Url) -> Self {
+        self.efb_docs_base = Some(with_trailing_slash(base));
+        self
+    }
+
+    /// Serves release notes from a URL template containing
+    /// [`Self::PRODUCT_PLACEHOLDER`].
+    pub fn with_changelog_url(mut self, template: impl Into<String>) -> IpcResult<Self> {
+        let template = template.into();
+        let probe = template.replace(Self::PRODUCT_PLACEHOLDER, "probe");
+        if !template.contains(Self::PRODUCT_PLACEHOLDER) || url::Url::parse(&probe).is_err() {
+            return Err(IpcError::internal(format!(
+                "changelog url {template:?} must be a URL containing {}",
+                Self::PRODUCT_PLACEHOLDER
+            )));
+        }
+        self.changelog_url = Some(template);
+        Ok(self)
     }
 }
 
@@ -98,6 +127,94 @@ impl ContentProvider for HttpContent {
                 format!("catalog did not parse: {e}"),
             )
         })
+    }
+
+    async fn changelog(&self, product_id: &str) -> IpcResult<Vec<ChangelogEntry>> {
+        let Some(template) = &self.changelog_url else {
+            return Ok(Vec::new());
+        };
+        if !product_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err(IpcError::new(
+                IpcErrorCode::ProductUnknown,
+                format!("bad product id {product_id:?}"),
+            ));
+        }
+        let url = template.replace(Self::PRODUCT_PLACEHOLDER, product_id);
+        let resp = self.http.get(url).send().await.map_err(network)?;
+        match resp.status() {
+            // No notes published for this product.
+            reqwest::StatusCode::NOT_FOUND => Ok(Vec::new()),
+            s if s.is_success() => resp.json().await.map_err(|e| {
+                IpcError::new(IpcErrorCode::CatalogInvalid, format!("changelog: {e}"))
+            }),
+            s => Err(IpcError::new(
+                IpcErrorCode::NetworkUnreachable,
+                format!("changelog request failed with HTTP {s}"),
+            )),
+        }
+    }
+
+    async fn efb_docs(&self) -> IpcResult<Vec<EfbDocMeta>> {
+        #[derive(serde::Deserialize)]
+        struct List {
+            docs: Vec<EfbDocMeta>,
+        }
+        let Some(base) = &self.efb_docs_base else {
+            return Ok(Vec::new());
+        };
+        let resp = self
+            .http
+            .get(join(base, "docs")?)
+            .send()
+            .await
+            .map_err(network)?;
+        if !resp.status().is_success() {
+            return Err(IpcError::new(
+                IpcErrorCode::NetworkUnreachable,
+                format!("documents request failed with HTTP {}", resp.status()),
+            ));
+        }
+        let list: List = resp
+            .json()
+            .await
+            .map_err(|e| IpcError::new(IpcErrorCode::CatalogInvalid, format!("documents: {e}")))?;
+        Ok(list.docs)
+    }
+
+    async fn efb_doc(&self, id: &str) -> IpcResult<Vec<u8>> {
+        let base = self
+            .efb_docs_base
+            .as_ref()
+            .ok_or_else(|| IpcError::unsupported("this build has no document source"))?;
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        {
+            return Err(IpcError::new(
+                IpcErrorCode::ProductUnknown,
+                format!("bad document id {id:?}"),
+            ));
+        }
+        let resp = self
+            .http
+            .get(join(base, &format!("doc/{id}"))?)
+            .send()
+            .await
+            .map_err(network)?;
+        match resp.status() {
+            s if s.is_success() => Ok(resp.bytes().await.map_err(network)?.to_vec()),
+            reqwest::StatusCode::NOT_FOUND => Err(IpcError::new(
+                IpcErrorCode::CdnNotFound,
+                format!("no document {id}"),
+            )),
+            s => Err(IpcError::new(
+                IpcErrorCode::NetworkUnreachable,
+                format!("document request failed with HTTP {s}"),
+            )),
+        }
     }
 
     async fn resolve_download(
@@ -200,6 +317,21 @@ mod tests {
         for bad in ["../x", "/etc", "https://evil.example/a", "//evil.example/a"] {
             assert!(join(&base, bad).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn changelog_url_needs_placeholder() {
+        let content = || HttpContent::new("https://example.com/{channel}.json", None).unwrap();
+        assert!(
+            content()
+                .with_changelog_url("https://example.com/notes")
+                .is_err()
+        );
+        assert!(
+            content()
+                .with_changelog_url("https://example.com/notes/{product}")
+                .is_ok()
+        );
     }
 
     #[test]

@@ -1,0 +1,32 @@
+[package]
+name = "infinity-navigraph"
+description = "Navigraph account linking (device flow) and navdata downloads."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+tracing = { workspace = true }
+url = { workspace = true }
+zip = { version = "4.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["net", "io-util"] }
+
+[lints]
+workspace = true

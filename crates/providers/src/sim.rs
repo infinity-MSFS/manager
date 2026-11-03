@@ -13,6 +13,12 @@ pub trait SimService: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// An aircraft depends on this service right now, so quitting the
+    /// manager should be confirmed first.
+    fn in_use(&self) -> bool {
+        false
+    }
+
     async fn start(&self, ctx: SimContext) -> IpcResult<()>;
 
     async fn stop(&self) -> IpcResult<()>;

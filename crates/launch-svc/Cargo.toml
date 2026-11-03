@@ -1,0 +1,40 @@
+[package]
+name = "infinity-launch-svc"
+description = "Windows service that starts the Infinity Manager when an in-sim aircraft probes the sentinel port."
+# The service's own version, independent of the workspace and shared with
+# v3. The manager compares it with the installed copy and offers an update
+# when they differ, so bump it by hand whenever the binary changes in a way
+# installed copies need.
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "infinity-launch-svc"
+path = "src/main.rs"
+
+[dependencies]
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_System_Environment",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
+
+[lints]
+workspace = true

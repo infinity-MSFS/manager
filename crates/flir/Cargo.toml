@@ -1,0 +1,34 @@
+[package]
+name = "infinity-flir-engine"
+description = "The MD-10 HUD's FLIR for the manager: the infinity-viewports nose camera developed by infinity-flir on its own thread."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-sim-tools-ipc = { workspace = true }
+flir-types = { workspace = true }
+flir-pipeline = { workspace = true }
+flir-stream = { workspace = true }
+base64 = { workspace = true }
+png = "0.18"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# The nose camera: injection, shared-memory video, the SimConnect pose feed.
+# Windows-only by nature (it injects into FlightSimulator2024.exe).
+[target.'cfg(windows)'.dependencies]
+infinity-viewports-host = { workspace = true }
+infinity-viewports-protocol = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

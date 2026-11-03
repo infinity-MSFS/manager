@@ -19,5 +19,6 @@ pub(crate) async fn prefs_save(
 ) -> Out<cmd::PrefsSave> {
     store.save(&args).await?;
     emit::<PreferencesChanged>(&app, &args);
+    crate::efb::apply(&app, &args).await;
     Ok(())
 }

@@ -1,0 +1,25 @@
+[package]
+name = "infinity-nav-db"
+description = "Navigation database queries: airports, runways, approaches, waypoints, restrictive airspace and military training routes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-sim-paths = { workspace = true }
+rusqlite = { version = "0.41", features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -13,10 +13,34 @@ publish.workspace = true
 infinity-ipc = { workspace = true }
 infinity-providers = { workspace = true }
 infinity-persistence = { workspace = true }
+infinity-installer = { workspace = true }
+infinity-configurator = { workspace = true }
+infinity-bridge = { workspace = true }
+infinity-nav-db = { workspace = true }
+infinity-navigraph = { workspace = true }
+infinity-simbrief = { workspace = true }
+infinity-efb-server = { workspace = true }
+infinity-link-server = { workspace = true }
+infinity-netdiag = { workspace = true }
+infinity-supervisor = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+futures-util = "0.3"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+reqwest = { workspace = true }
+pdfium-render = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+infinity-sim-paths = { workspace = true }
 infinity-sim-watch = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tauri = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process"] }
+# CDP client for the EFB browser engine: plain ws:// to a loopback port.
+tokio-tungstenite = "0.29"
 tauri-plugin-deep-link = { workspace = true }
+tauri-plugin-dialog = { workspace = true }
 tauri-plugin-opener = { workspace = true }
 tauri-plugin-single-instance = { workspace = true }
 tauri-plugin-window-state = { workspace = true }
@@ -24,5 +48,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# Safe registry reads for finding the EFB browser engine (App Paths).
+windows-registry = "0.6"
+
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

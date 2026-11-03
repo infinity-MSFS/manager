@@ -2,16 +2,21 @@
 
 mod app;
 mod brand;
+mod configurator;
 pub mod editorial;
 pub mod ext;
 pub mod ipc;
+pub mod markdown;
+pub mod notices;
 mod pages;
 mod routes;
 mod shell;
+pub mod sim_tools;
 pub mod state;
+mod theme;
 mod window;
 
-pub use ext::{Extensions, Gate, Page as ExtensionPage};
+pub use ext::{ConfiguratorPanel, Extensions, Gate, Page as ExtensionPage, SettingsSection};
 pub use infinity_ipc;
 pub use infinity_ui;
 pub use leptos;

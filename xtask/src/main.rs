@@ -59,17 +59,88 @@ fn cargo() -> Command {
 }
 
 fn dev(extra: &[&str]) -> Result {
-    run(cargo()
-        .current_dir(desktop_dir())
+    let mut cmd = cargo();
+    cmd.current_dir(desktop_dir())
         .args(["tauri", "dev"])
-        .args(extra))
+        .args(extra);
+    embed_launch_svc(&mut cmd, false)?;
+    run(&mut cmd)
 }
 
 fn dist(extra: &[&str]) -> Result {
-    run(cargo()
-        .current_dir(desktop_dir())
+    let mut cmd = cargo();
+    cmd.current_dir(desktop_dir())
         .args(["tauri", "build"])
-        .args(extra))
+        .args(extra);
+    embed_launch_svc(&mut cmd, true)?;
+    stage_viewports()?;
+    run(&mut cmd)
+}
+
+/// The FLIR nose camera's DLLs, injected into the simulator, are built in
+/// the `infinity-viewports` repository (`INFINITY_VIEWPORTS_DIR`, else the
+/// sibling checkout). Copies them into `resources/viewports/`, which the
+/// bundle installs beside the manager. Missing DLLs only warn: the build
+/// still works, and FLIR reports where it looked.
+fn stage_viewports() -> Result {
+    const DLLS: [&str; 2] = [
+        "infinity_viewports_bridge.dll",
+        "infinity_viewports_core.dll",
+    ];
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let repo = std::env::var_os("INFINITY_VIEWPORTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root().join("..").join("infinity-viewports"));
+    let built = repo.join("target").join("release");
+    let staged = desktop_dir().join("resources").join("viewports");
+    for dll in DLLS {
+        let from = built.join(dll);
+        if from.is_file() {
+            copy_file(&from, &staged.join(dll))?;
+        } else {
+            eprintln!(
+                "xtask: {} not found; FLIR will be unavailable in this bundle (build infinity-viewports with --release first)",
+                from.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Windows: builds the launch supervisor service (`infinity-launch-svc`)
+/// and points `INFINITY_LAUNCH_SVC_PREBUILT` at it, so
+/// `crates/supervisor/build.rs` embeds it in the manager. Without this the
+/// manager only finds the service beside its own executable. Elsewhere the
+/// supervisor is systemd user units and there is nothing to build.
+fn embed_launch_svc(cmd: &mut Command, release: bool) -> Result {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let mut build = cargo();
+    build
+        .current_dir(root())
+        .args(["build", "-p", "infinity-launch-svc"]);
+    if release {
+        build.arg("--release");
+    }
+    run(&mut build)?;
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|t| if t.is_absolute() { t } else { root().join(t) })
+        .unwrap_or_else(|| root().join("target"));
+    let exe = target
+        .join(if release { "release" } else { "debug" })
+        .join("infinity-launch-svc.exe");
+    if !exe.is_file() {
+        return Err(format!(
+            "built the launch supervisor but {} is missing",
+            exe.display()
+        ));
+    }
+    cmd.env("INFINITY_LAUNCH_SVC_PREBUILT", exe);
+    Ok(())
 }
 
 fn check() -> Result {

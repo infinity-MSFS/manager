@@ -6,6 +6,22 @@ members = [
     "crates/auth",
     "crates/persistence",
     "crates/sim-watch",
+    "crates/sim-paths",
+    "crates/installer",
+    "crates/configurator",
+    "crates/nav-db",
+    "crates/navigraph",
+    "crates/simbrief",
+    "crates/bridge",
+    "crates/efb-server",
+    "crates/launch-svc",
+    "crates/supervisor",
+    "crates/link-server",
+    "crates/netdiag",
+    "crates/sim-tools-ipc",
+    "crates/terrain",
+    "crates/flir",
+    "crates/sim-tools",
     "crates/app",
     "apps/desktop",
     "frontend",
@@ -17,6 +33,22 @@ default-members = [
     "crates/auth",
     "crates/persistence",
     "crates/sim-watch",
+    "crates/sim-paths",
+    "crates/installer",
+    "crates/configurator",
+    "crates/nav-db",
+    "crates/navigraph",
+    "crates/simbrief",
+    "crates/bridge",
+    "crates/efb-server",
+    "crates/launch-svc",
+    "crates/supervisor",
+    "crates/link-server",
+    "crates/netdiag",
+    "crates/sim-tools-ipc",
+    "crates/terrain",
+    "crates/flir",
+    "crates/sim-tools",
     "crates/app",
     "apps/desktop",
     "xtask",
@@ -39,6 +71,31 @@ infinity-auth = { path = "crates/auth" }
 infinity-app = { path = "crates/app" }
 infinity-persistence = { path = "crates/persistence" }
 infinity-sim-watch = { path = "crates/sim-watch" }
+infinity-sim-paths = { path = "crates/sim-paths" }
+infinity-installer = { path = "crates/installer" }
+infinity-configurator = { path = "crates/configurator" }
+infinity-nav-db = { path = "crates/nav-db" }
+infinity-navigraph = { path = "crates/navigraph" }
+infinity-simbrief = { path = "crates/simbrief" }
+infinity-bridge = { path = "crates/bridge" }
+infinity-efb-server = { path = "crates/efb-server" }
+infinity-supervisor = { path = "crates/supervisor" }
+infinity-link-server = { path = "crates/link-server" }
+infinity-netdiag = { path = "crates/netdiag" }
+infinity-sim-tools-ipc = { path = "crates/sim-tools-ipc" }
+infinity-sim-tools = { path = "crates/sim-tools" }
+infinity-terrain = { path = "crates/terrain" }
+infinity-flir-engine = { path = "crates/flir" }
+
+# Sibling checkouts (public repos): the terrain radar renderer, the nose
+# camera (infinity-viewports) and the thermal model + wire (infinity-flir).
+# TODO: pin as git dependencies once their local changes are pushed.
+infinity-terrain-radar = { path = "../infinity-terrain-radar/crates/infinity-terrain-radar" }
+infinity-viewports-host = { path = "../infinity-viewports/crates/infinity-viewports-host" }
+infinity-viewports-protocol = { path = "../infinity-viewports/crates/infinity-viewports-protocol" }
+flir-types = { path = "../infinity-flir/crates/flir-types" }
+flir-pipeline = { path = "../infinity-flir/crates/flir-pipeline" }
+flir-stream = { path = "../infinity-flir/crates/flir-stream" }
 
 # Shared
 serde = { version = "1", features = ["derive"] }
@@ -55,12 +112,13 @@ url = "2"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-build = { version = "2", default-features = false }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-deep-link = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
 
 # Frontend
 leptos = { version = "0.8.20", features = ["csr"] }

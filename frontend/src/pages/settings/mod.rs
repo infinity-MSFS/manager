@@ -1,16 +1,46 @@
+mod account;
+mod appearance;
+mod folders;
+mod integrations;
+pub(super) mod supervisor;
+
+use infinity_ipc::IpcError;
 use infinity_ipc::commands as cmd;
-use infinity_ipc::dto::{MotionPreference, Sim};
+use infinity_ipc::dto::{MotionPreference, Preferences};
 use infinity_ui::prelude::*;
 
 use super::{ErrorNote, Page};
 use crate::editorial::{EYEBROW, PageHead, SectionLabel};
+use crate::ext::use_extensions;
 use crate::ipc;
-use crate::state::use_app;
+use crate::state::{AppState, use_app};
 
 #[component]
 pub(crate) fn Settings() -> impl IntoView {
     let app = use_app();
     let yes_no = |b: bool| if b { "Yes" } else { "No" }.to_owned();
+    // Extension sections take the numbers after the built-in ones; a gated
+    // section that is hidden leaves its number unused, as built-ins do.
+    let extensions = use_extensions();
+    let extra = extensions.settings.len();
+    let num = move |n: usize| format!("{n:02}");
+    let extension_sections = extensions
+        .settings
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, section)| {
+            move || {
+                app.session.with(|s| section.gate.allows(s)).then(|| {
+                    view! {
+                        <SectionLabel num=num(9 + i) label=section.label />
+                        {(section.view)()}
+                        <Gap />
+                    }
+                })
+            }
+        })
+        .collect_view();
 
     view! {
         <Page>
@@ -23,10 +53,44 @@ pub(crate) fn Settings() -> impl IntoView {
                         </p>
                     }
                 })}
-            <SectionLabel num="01" label="Appearance" />
+            {move || {
+                app.capabilities
+                    .get()
+                    .accounts
+                    .then(|| view! { <SectionLabel num="01" label="Account" /><account::Account /><Gap /> })
+            }}
+            {move || {
+                (app.capabilities.get().channels.len() > 1)
+                    .then(|| view! { <SectionLabel num="02" label="Update channel" /><account::ChannelPicker /><Gap /> })
+            }}
+            <SectionLabel num="03" label="Install folders" />
+            <folders::InstallFolders />
+            <Gap />
+            <SectionLabel num="04" label="Simulator paths" />
+            <folders::SimOverrides />
+            <Gap />
+            {move || {
+                app.capabilities
+                    .get()
+                    .navigraph
+                    .then(|| view! { <SectionLabel num="05" label="Navigraph" /><integrations::Navigraph /><Gap /> })
+            }}
+            <SectionLabel num="06" label="SimBrief" />
+            <integrations::SimBrief />
+            <Gap />
+            <SectionLabel num="07" label="EFB tablets" />
+            <integrations::Efb />
+            <Gap />
+            <SectionLabel num="08" label="Launch supervisor" />
+            <supervisor::Supervisor />
+            <Gap />
+            {extension_sections}
+            <SectionLabel num=num(9 + extra) label="Appearance" />
+            <appearance::Appearance />
+            <div class="h-10"></div>
             <Motion />
-            <div class="h-14"></div>
-            <SectionLabel num="02" label="About this build" />
+            <Gap />
+            <SectionLabel num=num(10 + extra) label="About this build" />
             {move || {
                 let info = app.info.get();
                 let caps = app.capabilities.get();
@@ -45,6 +109,25 @@ pub(crate) fn Settings() -> impl IntoView {
             }}
         </Page>
     }
+}
+
+#[component]
+fn Gap() -> impl IntoView {
+    view! { <div class="h-14"></div> }
+}
+
+/// Saves preferences after `edit` changes the latest copy. Errors land in
+/// `error`; success arrives back through `PreferencesChanged`.
+fn save_prefs(
+    app: AppState,
+    error: RwSignal<Option<IpcError>>,
+    edit: impl FnOnce(&mut Preferences),
+) {
+    let mut prefs = app.prefs.get_untracked();
+    edit(&mut prefs);
+    leptos::task::spawn_local(async move {
+        error.set(ipc::invoke::<cmd::PrefsSave>(&prefs).await.err());
+    });
 }
 
 #[component]
@@ -86,13 +169,8 @@ fn Motion() -> impl IntoView {
     let current = move || app.prefs.with(|p| p.motion);
     let note = move || {
         let sim = app.sim.get().running?;
-        (current() == MotionPreference::Auto).then(|| {
-            let name = match sim {
-                Sim::Msfs2024 => "MSFS 2024",
-                Sim::Msfs2020 => "MSFS 2020",
-            };
-            format!("Reduced now: {name} is running.")
-        })
+        (current() == MotionPreference::Auto)
+            .then(|| format!("Reduced now: {} is running.", sim.label()))
     };
 
     view! {

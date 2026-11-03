@@ -16,12 +16,15 @@ path = "src/main.rs"
 [dependencies]
 infinity-app = { workspace = true }
 infinity-providers = { workspace = true }
+infinity-navigraph = { workspace = true }
+infinity-sim-tools = { workspace = true }
 serde_json = { workspace = true }
 tauri = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [build-dependencies]
+infinity-sim-tools-ipc = { workspace = true }
 tauri-build = { workspace = true }
 
 [lints]

@@ -43,6 +43,8 @@ fn dispatch(app: &tauri::AppHandle, url: url::Url) {
 
 pub(crate) fn focus_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // Hidden after a supervisor start.
+        let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }

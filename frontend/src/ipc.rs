@@ -144,3 +144,14 @@ pub(crate) fn js_error(value: JsValue) -> IpcError {
 pub fn warn(message: &str) {
     web_sys::console::warn_1(&JsValue::from_str(message));
 }
+
+/// Resolves after `ms` milliseconds.
+pub async fn sleep(ms: u32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let delay = i32::try_from(ms).unwrap_or(i32::MAX);
+        if let Some(window) = web_sys::window() {
+            let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, delay);
+        }
+    });
+    let _ = JsFuture::from(promise).await;
+}

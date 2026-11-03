@@ -91,7 +91,13 @@ pub struct ArchiveRef {
 #[serde(rename_all = "lowercase")]
 pub enum ArchiveFormat {
     Zip,
+    /// `.tar.zst`; `"tarzst"` on the wire, as the CDN Worker writes it.
     TarZst,
+    /// A format newer than this build. Parsed rather than rejected so one
+    /// such product does not make the whole catalog unreadable; installing
+    /// it fails with `Unsupported`.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +265,39 @@ pub enum OutputSpec {
     },
 }
 
+impl PackageSpec {
+    pub fn archive(&self) -> &ArchiveRef {
+        match self {
+            Self::Msfs2024 { archive, .. }
+            | Self::Msfs2020 { archive, .. }
+            | Self::Generic { archive } => archive,
+        }
+    }
+
+    /// The folder the package occupies in the sim's Community folder.
+    pub fn package_dir_name(&self) -> Option<&str> {
+        match self {
+            Self::Msfs2024 {
+                package_dir_name, ..
+            }
+            | Self::Msfs2020 {
+                package_dir_name, ..
+            } => Some(package_dir_name),
+            Self::Generic { .. } => None,
+        }
+    }
+
+    /// Key of the package's integrity manifest, when it ships one.
+    pub fn manifest_key(&self) -> Option<&str> {
+        match self {
+            Self::Msfs2024 { manifest_key, .. } | Self::Msfs2020 { manifest_key, .. } => {
+                manifest_key.as_deref()
+            }
+            Self::Generic { .. } => None,
+        }
+    }
+}
+
 impl OutputSpec {
     pub fn id(&self) -> &str {
         match self {
@@ -354,10 +393,36 @@ pub struct Livery {
     pub package_dir_name: String,
 }
 
+/// A published EFB document (Worker `GET /v1/efb/docs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EfbDocMeta {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub category: String,
+}
+
 /// Worker `POST /v1/entitlements` response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntitlementsResponse {
     pub products: Vec<ProductId>,
     #[serde(default)]
     pub channels: Vec<crate::dto::Channel>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_formats_match_the_worker() {
+        let parse = |s: &str| serde_json::from_str::<ArchiveFormat>(s).unwrap();
+        assert_eq!(parse("\"zip\""), ArchiveFormat::Zip);
+        assert_eq!(parse("\"tarzst\""), ArchiveFormat::TarZst);
+        assert_eq!(parse("\"7z\""), ArchiveFormat::Unknown);
+        assert_eq!(
+            serde_json::to_string(&ArchiveFormat::TarZst).unwrap(),
+            "\"tarzst\""
+        );
+    }
 }

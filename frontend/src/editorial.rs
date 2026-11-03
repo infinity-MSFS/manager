@@ -40,7 +40,7 @@ pub fn PageHead(
 }
 
 #[component]
-pub fn SectionLabel(num: &'static str, label: &'static str) -> impl IntoView {
+pub fn SectionLabel(#[prop(into)] num: String, #[prop(into)] label: String) -> impl IntoView {
     view! {
         <div class=cn!("mb-8 flex items-center gap-4", EYEBROW)>
             <span class="text-accent-400/80">{num}</span>

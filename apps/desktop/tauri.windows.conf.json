@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "resources": {
+      "resources/faa_mtr.sqlite": "resources/faa_mtr.sqlite",
+      "resources/pdfium.dll": "resources/pdfium.dll",
+      "resources/viewports/": "viewports/"
+    }
+  }
+}

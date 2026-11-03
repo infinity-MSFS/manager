@@ -1,0 +1,26 @@
+[package]
+name = "infinity-netdiag"
+description = "Boot-time network diagnostics for support logs: proxy and root-store picture, then a DNS, TCP and TLS probe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+httpdate = "1"
+reqwest = { workspace = true }
+rustls-native-certs = "0.8"
+tokio = { workspace = true, features = ["net"] }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

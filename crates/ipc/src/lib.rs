@@ -3,6 +3,9 @@ pub mod commands;
 pub mod dto;
 pub mod error;
 pub mod events;
+pub mod nav;
+pub mod navigraph;
+pub mod simbrief;
 
 pub use error::{IpcError, IpcErrorCode, IpcResult};
 

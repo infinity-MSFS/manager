@@ -71,10 +71,8 @@ fn detect<S: AsRef<str>>(names: impl Iterator<Item = S>) -> Option<Sim> {
     for name in names {
         let name = name.as_ref();
         for (exe, sim) in EXECUTABLES {
-            if name.eq_ignore_ascii_case(exe) {
-                if found != Some(Sim::Msfs2024) {
-                    found = Some(*sim);
-                }
+            if name.eq_ignore_ascii_case(exe) && found != Some(Sim::Msfs2024) {
+                found = Some(*sim);
             }
         }
     }

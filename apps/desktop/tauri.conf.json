@@ -57,6 +57,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": { "resources/faa_mtr.sqlite": "resources/faa_mtr.sqlite" },
     "icon": ["icons/logo.png", "icons/infinity.ico"],
     "windows": {
       "webviewInstallMode": {

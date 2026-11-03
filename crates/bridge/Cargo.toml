@@ -1,0 +1,28 @@
+[package]
+name = "infinity-bridge"
+description = "Loopback WebSocket bridges between the manager and in-sim WASM gauges."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+infinity-ipc = { workspace = true }
+infinity-bridge-host = "0.1.2"
+axum = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+tokio-util = "0.7"
+tracing = { workspace = true }
+
+[dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = "0.29"
+
+[lints]
+workspace = true

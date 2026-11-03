@@ -19,6 +19,11 @@ pub struct PkceIdentity {
     http: reqwest::Client,
     store: Arc<dyn TokenStore>,
     state: Mutex<State>,
+    /// Held while a refresh is in flight, so concurrent callers wait for
+    /// one refresh instead of each spending the refresh token. With
+    /// rotation on, a second use of the same refresh token is a reuse and
+    /// the identity provider revokes the whole session.
+    refreshing: Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -26,6 +31,9 @@ struct State {
     pending: Option<Pending>,
     tokens: Option<Tokens>,
     profile: Option<UserProfile>,
+    /// Bumped whenever the session is replaced or ended, so a refresh that
+    /// started under an older session cannot write its tokens back.
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -36,6 +44,15 @@ struct Pending {
 }
 
 impl PkceIdentity {
+    async fn fresh_token(&self) -> Option<AccessToken> {
+        let state = self.state.lock().await;
+        state
+            .tokens
+            .as_ref()
+            .filter(|t| t.is_fresh())
+            .map(|t| AccessToken::new(t.access_token.clone()))
+    }
+
     pub fn new(cfg: AuthConfig, store: Arc<dyn TokenStore>) -> IpcResult<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
@@ -46,6 +63,7 @@ impl PkceIdentity {
             http,
             store,
             state: Mutex::new(State::default()),
+            refreshing: Mutex::new(()),
         })
     }
 
@@ -82,6 +100,7 @@ impl PkceIdentity {
         let mut state = self.state.lock().await;
         state.tokens = Some(tokens);
         state.profile = Some(profile.clone());
+        state.generation += 1;
         Ok(SessionState::SignedIn { profile })
     }
 }
@@ -160,7 +179,10 @@ impl IdentityProvider for PkceIdentity {
         let refresh_token = {
             let mut state = self.state.lock().await;
             let rt = state.tokens.take().and_then(|t| t.refresh_token);
-            *state = State::default();
+            *state = State {
+                generation: state.generation + 1,
+                ..State::default()
+            };
             rt
         };
         self.store.clear()?;
@@ -173,22 +195,34 @@ impl IdentityProvider for PkceIdentity {
     }
 
     async fn access_token(&self) -> IpcResult<AccessToken> {
-        let refresh_token = {
+        if let Some(token) = self.fresh_token().await {
+            return Ok(token);
+        }
+        let _refreshing = self.refreshing.lock().await;
+        // Whoever held the gate before us may have refreshed already.
+        let (generation, refresh_token) = {
             let state = self.state.lock().await;
             match &state.tokens {
                 Some(t) if t.is_fresh() => return Ok(AccessToken::new(t.access_token.clone())),
-                Some(t) => t.refresh_token.clone(),
-                None => None,
+                Some(t) => (state.generation, t.refresh_token.clone()),
+                None => (state.generation, None),
             }
-        }
-        .ok_or_else(|| IpcError::new(IpcErrorCode::AuthRequired, "not signed in"))?;
+        };
+        let refresh_token = refresh_token
+            .ok_or_else(|| IpcError::new(IpcErrorCode::AuthRequired, "not signed in"))?;
 
         let tokens = wire::refresh(&self.http, &self.cfg, &refresh_token).await?;
+        let mut state = self.state.lock().await;
+        if state.generation != generation {
+            // Signed out (or in as someone else) while refreshing: these
+            // tokens belong to a session that no longer exists.
+            return Err(IpcError::new(IpcErrorCode::AuthRequired, "not signed in"));
+        }
         if let Some(rt) = &tokens.refresh_token {
             self.store.save(rt)?;
         }
         let access = AccessToken::new(tokens.access_token.clone());
-        self.state.lock().await.tokens = Some(tokens);
+        state.tokens = Some(tokens);
         Ok(access)
     }
 }
@@ -264,6 +298,87 @@ mod tests {
         let err = p.complete_login(&cb).await.unwrap_err();
         assert_eq!(err.code, IpcErrorCode::AuthForbidden);
         assert_eq!(p.session().await, SessionState::SignedOut);
+    }
+
+    /// A token endpoint that counts refreshes and answers each with a new
+    /// rotated refresh token, after a delay so callers overlap.
+    fn token_server() -> (url::Url, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::sync::atomic::Ordering;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = url::Url::parse(&format!("http://{addr}/oauth/token")).unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(Duration::from_millis(150));
+                let body = format!(
+                    r#"{{"access_token":"access-{n}","refresh_token":"refresh-{n}","expires_in":3600}}"#
+                );
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        (url, hits)
+    }
+
+    fn expired(refresh: &str) -> Tokens {
+        Tokens {
+            access_token: "stale".into(),
+            refresh_token: Some(refresh.into()),
+            expires_at: 0,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_callers_share_one_refresh() {
+        let (token_url, hits) = token_server();
+        let mut p = provider();
+        p.cfg.endpoints.token = token_url;
+        p.state.lock().await.tokens = Some(expired("refresh-0"));
+        let p = Arc::new(p);
+
+        let calls: Vec<_> = (0..5)
+            .map(|_| {
+                let p = p.clone();
+                tokio::spawn(async move { p.access_token().await })
+            })
+            .collect();
+        for call in calls {
+            assert_eq!(call.await.unwrap().unwrap().expose(), "access-1");
+        }
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(p.store.load().unwrap().as_deref(), Some("refresh-1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_finishing_after_logout_is_discarded() {
+        let (token_url, _hits) = token_server();
+        let mut p = provider();
+        p.cfg.endpoints.token = token_url;
+        p.cfg.endpoints.revoke = None;
+        p.state.lock().await.tokens = Some(expired("refresh-0"));
+        let p = Arc::new(p);
+
+        let refreshing = tokio::spawn({
+            let p = p.clone();
+            async move { p.access_token().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        p.logout().await.unwrap();
+
+        let err = refreshing.await.unwrap().unwrap_err();
+        assert_eq!(err.code, IpcErrorCode::AuthRequired);
+        assert!(p.state.lock().await.tokens.is_none());
+        assert_eq!(p.store.load().unwrap(), None, "no token written back");
     }
 
     #[test]
