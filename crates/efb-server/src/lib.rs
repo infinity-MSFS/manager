@@ -12,10 +12,12 @@
 //!
 //! The server owns the protocol; anything that needs an account, a network
 //! service or native code (documents, flight plans, charts, the web view)
-//! comes in through the traits in [`Providers`]. A missing provider turns
+//! comes in through the traits in [`Providers`]. Charts are served only
+//! inside a live sim session: see [`charts`]. A missing provider turns
 //! its `cmd` frames into plain rebroadcasts, which clients time out on.
 //! [`sources`] has ready-made providers that need nothing but HTTP or a file.
 
+pub mod charts;
 mod cmd;
 mod dto;
 mod error;
@@ -37,8 +39,7 @@ pub use pairing::{
 pub use protocol::{Broadcast, ClientId, Incoming, Outgoing, PROTOCOL_VERSION, close_code};
 pub use providers::{
     BrowserEmitter, BrowserProvider, CtlStore, DocMeta, DocProvider, FplProvider, MAX_TILE_ZOOM,
-    MAX_VIEWPORT, MIN_VIEWPORT, NavProvider, ProviderError, Providers, TILE_LAYERS, TileSource,
-    WxProvider,
+    MAX_VIEWPORT, MIN_VIEWPORT, ProviderError, Providers, TILE_LAYERS, TileSource, WxProvider,
 };
 pub use server::{DEFAULT_PORT, EfbConfig, EfbServer, default_bind};
 pub use state::EfbState;

@@ -7,7 +7,7 @@ mod local_docs;
 mod tiles;
 mod weather;
 
-pub use charts::charts_index_for_efb;
+pub use charts::navigraph_entries;
 pub use ctl_file::FileCtlStore;
 pub use local_docs::{
     LOCAL_DOC_CATEGORY, LOCAL_DOC_PREFIX, LocalDoc, sanitize_doc_id, scan_local_docs,

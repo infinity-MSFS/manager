@@ -4,6 +4,7 @@ mod deep_link;
 mod efb;
 mod efb_browser;
 mod efb_docs;
+mod efb_presence;
 mod events;
 mod paths;
 mod simbrief_gauge;
@@ -143,6 +144,9 @@ impl Builder {
                 )
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
                 app.manage(navigraph);
+                // The charts lease reads the sim watch, so it comes first.
+                app.manage(watch_sim(app.handle()));
+                app.manage(efb_presence::start(app.handle()));
                 app.manage(efb::Efb::new());
                 efb::forward_changes(app.handle());
                 let handle = app.handle().clone();
@@ -150,7 +154,6 @@ impl Builder {
                     let prefs = handle.state::<PreferencesStore>().load().await;
                     efb::apply(&handle, &prefs.unwrap_or_default()).await;
                 });
-                app.manage(watch_sim(app.handle()));
                 boot::setup(app.handle());
                 deep_link::install(app.handle())?;
                 window_geometry::repair(app.handle());

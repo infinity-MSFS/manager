@@ -132,6 +132,18 @@ impl TokenManager {
         st.relink_required = false;
     }
 
+    /// Marks the session stale when `rejected` is still its access token, so
+    /// the next [`bearer`](Self::bearer) refreshes. A token another caller
+    /// already replaced is left alone: concurrent 401s spend one refresh.
+    pub async fn expire(&self, rejected: &Secret) {
+        let mut st = self.inner.lock().await;
+        if let Some(s) = st.session.as_mut()
+            && s.access_token == *rejected
+        {
+            s.fresh_until = Instant::now();
+        }
+    }
+
     pub async fn status(&self) -> TokenStatus {
         let st = self.inner.lock().await;
         TokenStatus {

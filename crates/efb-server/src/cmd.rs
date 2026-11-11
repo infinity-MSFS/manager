@@ -8,15 +8,18 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::charts::hub::ChartsHub;
 use crate::protocol::ClientId;
 use crate::providers::{MAX_VIEWPORT, MIN_VIEWPORT, ProviderError};
 use crate::server::Ctx;
 
 const DEFAULT_VIEWPORT: u32 = 800;
+/// The source the pre-hub `nav.*` cmds and route speak for.
+pub(crate) const LEGACY_SOURCE: &str = "navigraph";
 
-pub(crate) fn handle(ctx: &Ctx, client: ClientId, name: String, data: Value) {
+pub(crate) fn handle(ctx: &Ctx, client: ClientId, loopback: bool, name: String, data: Value) {
     let state = ctx.shared.state.clone();
     let p = &ctx.providers;
 
@@ -150,14 +153,73 @@ pub(crate) fn handle(ctx: &Ctx, client: ClientId, name: String, data: Value) {
                 state.forward_cmd("ctl.result", op_result("save", &result), None);
             });
         }
-        "nav.status" => {
-            let nav = provider!(nav);
+        // Charts. Every one goes through the hub, which refuses all of them
+        // unless the sim-session lease is live (`crate::charts`).
+        "charts.alive" => {
+            // The in-sim panel's check-in. A tablet cannot keep the
+            // session alive: loopback is the panel's machine.
+            if loopback {
+                ctx.charts.panel_alive();
+            } else {
+                debug!(
+                    client,
+                    "efb-server: charts.alive from a remote client ignored"
+                );
+            }
+        }
+        "charts.status" => {
+            let charts = ctx.charts.clone();
             ctx.spawn(async move {
-                state.forward_cmd("nav.info", nav.status().await, None);
+                state.forward_cmd("charts.info", charts.info().await, None);
+            });
+        }
+        "charts.index" => {
+            let charts = ctx.charts.clone();
+            let source = str_field(&data, "source").unwrap_or_default();
+            let icao = str_field(&data, "icao").unwrap_or_default().to_uppercase();
+            ctx.spawn(async move {
+                let reply = match charts.index(&source, &icao).await {
+                    Ok(list) => json!({
+                        "source": source, "icao": icao, "ok": true, "error": null,
+                        "charts": &*list,
+                    }),
+                    Err(e) => {
+                        debug!(
+                            source,
+                            icao,
+                            code = e.code,
+                            "efb-server: charts.index refused"
+                        );
+                        json!({
+                            "source": source, "icao": icao, "ok": false, "charts": [],
+                            "error": e.to_json(),
+                        })
+                    }
+                };
+                state.forward_cmd("charts.indexResult", reply, None);
+            });
+        }
+        // The T-38's pre-hub names, answered from the Navigraph source
+        // through the same lease.
+        "nav.status" => {
+            let charts = ctx.charts.clone();
+            ctx.spawn(async move {
+                let info = charts.info().await;
+                let navigraph = info["sources"]
+                    .as_array()
+                    .and_then(|a| a.iter().find(|s| s["id"] == LEGACY_SOURCE))
+                    .map(|s| s["state"].as_str().unwrap_or_default().to_owned());
+                let linked = matches!(navigraph.as_deref(), Some("ready" | "no_subscription"));
+                let reply = json!({
+                    "linked": linked,
+                    "relink_required": navigraph.as_deref() == Some("relink_required"),
+                    "session_live": linked && info["access"]["live"] == true,
+                });
+                state.forward_cmd("nav.info", reply, None);
             });
         }
         "nav.charts" => {
-            let nav = provider!(nav);
+            let charts = ctx.charts.clone();
             let Some(icao) = str_field(&data, "icao")
                 .map(|s| s.to_uppercase())
                 .filter(|s| !s.is_empty())
@@ -165,10 +227,10 @@ pub(crate) fn handle(ctx: &Ctx, client: ClientId, name: String, data: Value) {
                 return;
             };
             ctx.spawn(async move {
-                let reply = match nav.charts_index(&icao).await {
-                    Ok(index) => json!({
+                let reply = match charts.index(LEGACY_SOURCE, &icao).await {
+                    Ok(list) => json!({
                         "icao": icao, "ok": true, "error": null,
-                        "charts": index.get("charts").cloned().unwrap_or_else(|| json!([])),
+                        "charts": list.iter().map(ChartsHub::legacy_entry).collect::<Vec<_>>(),
                     }),
                     Err(e) => {
                         warn!(icao, code = e.code, "efb-server: nav.charts failed");

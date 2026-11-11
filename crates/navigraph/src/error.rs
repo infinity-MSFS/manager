@@ -19,6 +19,11 @@ pub enum NavigraphError {
     )]
     NoSubscription,
 
+    /// Navigraph rejected the access token itself (HTTP 401). The account
+    /// retries once with a refreshed token before reporting it.
+    #[error("Navigraph rejected the session token. Re-link your account in Settings.")]
+    Unauthorized,
+
     #[error("Navigraph link not started")]
     LinkNotStarted,
 
@@ -69,6 +74,7 @@ impl NavigraphError {
             Self::NotLinked => "not_linked",
             Self::RelinkRequired => "relink_required",
             Self::NoSubscription => "no_subscription",
+            Self::Unauthorized => "unauthorized",
             Self::LinkNotStarted => "link_not_started",
             Self::Credentials(_) => "credentials",
             Self::Store(_) => "store",
@@ -94,6 +100,7 @@ impl From<NavigraphError> for IpcError {
             NavigraphError::NotLinked => IpcErrorCode::AuthRequired,
             NavigraphError::RelinkRequired => IpcErrorCode::AuthExpired,
             NavigraphError::NoSubscription => IpcErrorCode::AuthForbidden,
+            NavigraphError::Unauthorized => IpcErrorCode::AuthExpired,
             NavigraphError::LinkNotStarted => IpcErrorCode::ValidationFailed,
             // The seam implementations pick the code (e.g. auth_required
             // when the user is signed out of the Infinity account).

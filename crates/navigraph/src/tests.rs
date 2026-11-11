@@ -631,3 +631,61 @@ async fn plan_errors() {
         .unwrap_err();
     assert!(matches!(err, NavigraphError::NoMatchingPackage));
 }
+
+#[tokio::test]
+async fn revoked_access_token_refreshes_once_and_retries() {
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let counter = refreshes.clone();
+    let server = TestServer::start(move |req: &Request| match req.path() {
+        "/connect/token" => {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            tokens_response(&format!("access-{n}"), &format!("refresh-{n}"))
+        }
+        // The first access token is revoked early; its successor works.
+        "/v2/charts/KEDW" => match req.header("authorization") {
+            Some("Bearer access-0") => Response::bytes(401, ""),
+            _ => Response::json(200, serde_json::json!({ "charts": [] })),
+        },
+        "/v2/charts/KEDW/a.png" => match req.header("authorization") {
+            Some("Bearer access-1") => Response::bytes(200, "png"),
+            _ => Response::bytes(401, ""),
+        },
+        _ => Response::bytes(404, ""),
+    })
+    .await;
+    let store = Arc::new(MemoryTokenStore::default());
+    store.save(&Secret::new("refresh-seed")).await.unwrap();
+    let nav = navigraph(&server, store);
+
+    assert_eq!(
+        nav.charts_index("KEDW").await.unwrap(),
+        serde_json::json!({ "charts": [] })
+    );
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        2,
+        "cold start + one retry"
+    );
+    assert_eq!(nav.chart_bytes("KEDW", "a.png").await.unwrap(), b"png");
+    assert_eq!(
+        refreshes.load(Ordering::SeqCst),
+        2,
+        "the fresh token is reused"
+    );
+}
+
+#[tokio::test]
+async fn a_second_401_is_reported_not_looped() {
+    let server = TestServer::start(|req: &Request| match req.path() {
+        "/connect/token" => tokens_response("access", "refresh"),
+        _ => Response::bytes(401, ""),
+    })
+    .await;
+    let store = Arc::new(MemoryTokenStore::default());
+    store.save(&Secret::new("seed")).await.unwrap();
+    let nav = navigraph(&server, store);
+    let err = nav.charts_index("KEDW").await.unwrap_err();
+    assert!(matches!(err, NavigraphError::Unauthorized));
+    assert_eq!(server.hits("/v2/charts/KEDW"), 2);
+    assert_eq!(IpcError::from(err).code, IpcErrorCode::AuthExpired);
+}

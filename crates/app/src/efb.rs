@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use infinity_efb_server::sources::{
-    AviationWeather, FileCtlStore, PublicTiles, charts_index_for_efb,
+use infinity_efb_server::charts::{
+    ChartEntry, ChartImage, ChartProvider, ChartSource, SourceState, codes,
 };
+use infinity_efb_server::sources::{AviationWeather, FileCtlStore, PublicTiles, navigraph_entries};
 use infinity_efb_server::{
-    DEFAULT_PORT, EfbConfig, EfbServer, FplProvider, NavProvider, PairingSecret, ProviderError,
-    Providers,
+    DEFAULT_PORT, EfbConfig, EfbServer, FplProvider, PairingSecret, ProviderError, Providers,
 };
 use infinity_ipc::dto::Preferences;
 use infinity_ipc::events::{EfbChanged, PreferencesChanged};
@@ -19,7 +19,7 @@ use infinity_ipc::{IpcError, IpcResult};
 use infinity_persistence::PreferencesStore;
 use infinity_simbrief::SimBriefClient;
 use infinity_simbrief::wire::{self, Surface, WireError};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
@@ -167,7 +167,12 @@ fn providers(app: &tauri::AppHandle) -> IpcResult<Providers> {
             pdfium,
         ))),
         fpl: Some(Arc::new(SimBriefPlans(app.clone()))),
-        nav: Some(Arc::new(NavigraphCharts(app.clone()))),
+        charts: vec![Arc::new(NavigraphCharts(app.clone()))],
+        presence: Some(
+            app.state::<Arc<crate::efb_presence::ChartsPresence>>()
+                .inner()
+                .clone(),
+        ),
         wx: Some(Arc::new(AviationWeather::new(http.clone()))),
         tiles: Some(Arc::new(PublicTiles::new(http))),
         ctl: Some(Arc::new(FileCtlStore::in_app_data(Path::new(&app_data)))),
@@ -219,45 +224,104 @@ impl FplProvider for SimBriefPlans {
     }
 }
 
-/// The EFB's charts, from the linked Navigraph account.
+/// The EFB's Navigraph charts, from the account linked in the manager. Served
+/// only through the server's sim-session lease; nothing here may bypass it.
 struct NavigraphCharts(tauri::AppHandle);
 
+/// What the EFB credits under every Navigraph chart.
+const NAVIGRAPH_ATTRIBUTION: &str = "Charts \u{a9} Navigraph. Not for real-world navigation.";
+
 fn nav_error(e: infinity_navigraph::NavigraphError) -> ProviderError {
-    let e = IpcError::from(e);
-    ProviderError::new(e.code.to_string(), e.message)
+    use infinity_navigraph::NavigraphError as E;
+    let code = match &e {
+        E::Api { status: 429, .. } => codes::RATE_LIMITED,
+        E::Api { status: 404, .. } => codes::UNKNOWN_IMAGE,
+        E::Api { status, .. } if *status >= 500 => codes::NETWORK,
+        // Timeouts and refused connections: the hub retries these once.
+        E::Network(_) => codes::NETWORK,
+        other => other.reason(),
+    };
+    ProviderError::new(code, e.to_string())
+}
+
+impl NavigraphCharts {
+    fn account(&self) -> Result<&infinity_navigraph::Navigraph, ProviderError> {
+        self.0
+            .state::<NavigraphState>()
+            .inner()
+            .account()
+            .map_err(|e| ProviderError::new(e.code.to_string(), e.message))
+    }
 }
 
 #[async_trait]
-impl NavProvider for NavigraphCharts {
-    async fn status(&self) -> Value {
-        match self.0.state::<NavigraphState>().account() {
-            Ok(account) => {
-                let s = account.status().await;
-                json!({
-                    "linked": s.linked,
-                    "relink_required": s.relink_required,
-                    "session_live": s.session_live,
-                })
-            }
-            Err(_) => json!({ "linked": false, "relink_required": false, "session_live": false }),
+impl ChartProvider for NavigraphCharts {
+    fn source(&self) -> ChartSource {
+        ChartSource {
+            id: "navigraph".into(),
+            name: "Navigraph".into(),
+            attribution: NAVIGRAPH_ATTRIBUTION.into(),
         }
     }
 
-    async fn charts_index(&self, icao: &str) -> Result<Value, ProviderError> {
-        let state = self.0.state::<NavigraphState>();
-        let account = state
-            .account()
-            .map_err(|e| ProviderError::new(e.code.to_string(), e.message))?;
-        let raw = account.charts_index(icao).await.map_err(nav_error)?;
-        Ok(charts_index_for_efb(&raw))
+    async fn status(&self) -> SourceState {
+        use infinity_navigraph::NavigraphError as E;
+        let Ok(account) = self.account() else {
+            return SourceState::Unavailable {
+                message: "This build cannot link a Navigraph account.".into(),
+            };
+        };
+        let s = account.status().await;
+        if let Some(message) = s.vault_error {
+            return SourceState::Unavailable { message };
+        }
+        if s.relink_required {
+            return SourceState::RelinkRequired;
+        }
+        if !s.linked {
+            return SourceState::NotLinked;
+        }
+        match account.bearer().await {
+            Ok(bearer) => match infinity_navigraph::token_subscriptions(&bearer) {
+                Some(subs) if !subs.iter().any(|s| s == "charts") => SourceState::NoSubscription,
+                _ => SourceState::Ready,
+            },
+            Err(E::RelinkRequired) => SourceState::RelinkRequired,
+            Err(E::NotLinked) => SourceState::NotLinked,
+            Err(e) => SourceState::Unavailable {
+                message: e.to_string(),
+            },
+        }
     }
 
-    async fn chart(&self, icao: &str, filename: &str) -> Result<Vec<u8>, ProviderError> {
-        let state = self.0.state::<NavigraphState>();
-        let account = state
-            .account()
-            .map_err(|e| ProviderError::new(e.code.to_string(), e.message))?;
-        account.chart_bytes(icao, filename).await.map_err(nav_error)
+    async fn index(&self, icao: &str) -> Result<Vec<ChartEntry>, ProviderError> {
+        let raw = self
+            .account()?
+            .charts_index(icao)
+            .await
+            .map_err(nav_error)?;
+        Ok(navigraph_entries(&raw))
+    }
+
+    async fn image(&self, icao: &str, key: &str) -> Result<ChartImage, ProviderError> {
+        let bytes = self
+            .account()?
+            .chart_bytes(icao, key)
+            .await
+            .map_err(nav_error)?;
+        Ok(ChartImage {
+            content_type: sniff_image(&bytes),
+            bytes,
+        })
+    }
+}
+
+/// Navigraph serves PNG; sniffed rather than assumed so a format change
+/// cannot hand the panel a body labelled wrongly.
+fn sniff_image(bytes: &[u8]) -> &'static str {
+    match bytes {
+        [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+        _ => "image/png",
     }
 }
 

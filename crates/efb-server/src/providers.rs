@@ -3,7 +3,8 @@
 //! The server owns every wire format (the `cmd` frames, the ui-state keys,
 //! the HTTP image routes); a provider only does the work behind one. They
 //! trade plain JSON where the shape belongs to the EFB client, so this crate
-//! needs no SimBrief, Navigraph, PDF or browser code. Each is optional: with
+//! needs no SimBrief, Navigraph, PDF or browser code. Chart sources plug in
+//! through [`crate::charts::ChartProvider`] instead. Each is optional: with
 //! none wired, its `cmd`s are rebroadcast unanswered and its routes 404.
 //!
 //! All but [`BrowserProvider::input`] are called on spawned tasks, so they
@@ -15,6 +16,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{Value, json};
+
+use crate::charts::{ChartProvider, SimPresence};
 
 /// A failure shipped to the client verbatim as `{ code, message }`. `code`
 /// is the provider's vocabulary (`pilot_id_missing`, `network`,
@@ -101,20 +104,6 @@ pub trait CtlStore: Send + Sync {
     async fn save(&self, blob: Value) -> Result<(), ProviderError>;
 }
 
-/// Airport charts (`nav.status`, `nav.charts`, `/efb/nav/chart/{icao}/{file}`).
-#[async_trait]
-pub trait NavProvider: Send + Sync {
-    /// `{ linked, relink_required, session_live }`, sent as `nav.info`.
-    async fn status(&self) -> Value;
-
-    /// `{ "charts": [...] }` for an upper-cased ICAO; see
-    /// [`crate::sources::charts_index_for_efb`] for the entry shape.
-    async fn charts_index(&self, icao: &str) -> Result<Value, ProviderError>;
-
-    /// PNG bytes of one chart image named in the index.
-    async fn chart(&self, icao: &str, filename: &str) -> Result<Vec<u8>, ProviderError>;
-}
-
 /// Layers the map may ask for.
 pub const TILE_LAYERS: [&str; 5] = ["dark", "sat", "vfr", "ifr.lo", "ifr.hi"];
 pub const MAX_TILE_ZOOM: u8 = 18;
@@ -189,7 +178,11 @@ pub struct Providers {
     pub fpl: Option<Arc<dyn FplProvider>>,
     pub wx: Option<Arc<dyn WxProvider>>,
     pub ctl: Option<Arc<dyn CtlStore>>,
-    pub nav: Option<Arc<dyn NavProvider>>,
+    /// Chart sources, in the order the EFB lists them. All of them are
+    /// served through the sim-session lease (`crate::charts`).
+    pub charts: Vec<Arc<dyn ChartProvider>>,
+    /// What gates the charts. `None` keeps them locked.
+    pub presence: Option<Arc<dyn SimPresence>>,
     pub tiles: Option<Arc<dyn TileSource>>,
     pub browser: Option<Arc<dyn BrowserProvider>>,
 }
@@ -201,7 +194,8 @@ impl std::fmt::Debug for Providers {
             .field("fpl", &self.fpl.is_some())
             .field("wx", &self.wx.is_some())
             .field("ctl", &self.ctl.is_some())
-            .field("nav", &self.nav.is_some())
+            .field("charts", &self.charts.len())
+            .field("presence", &self.presence.is_some())
             .field("tiles", &self.tiles.is_some())
             .field("browser", &self.browser.is_some())
             .finish()

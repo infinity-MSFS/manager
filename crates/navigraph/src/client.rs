@@ -292,7 +292,8 @@ impl NavigraphClient {
             .await?;
         match resp.status().as_u16() {
             200 => Ok(resp.json().await?),
-            401 | 403 => Err(NavigraphError::NoSubscription),
+            401 => Err(NavigraphError::Unauthorized),
+            403 => Err(NavigraphError::NoSubscription),
             404 => Ok(serde_json::json!({ "charts": [] })),
             _ => Err(api_error(resp).await),
         }
@@ -313,7 +314,8 @@ impl NavigraphClient {
             .await?;
         match resp.status().as_u16() {
             200 => Ok(resp.bytes().await?.to_vec()),
-            401 | 403 => Err(NavigraphError::NoSubscription),
+            401 => Err(NavigraphError::Unauthorized),
+            403 => Err(NavigraphError::NoSubscription),
             404 => Err(NavigraphError::Api {
                 status: 404,
                 body: "chart not found".into(),
@@ -343,7 +345,8 @@ impl NavigraphClient {
                     }
                 })
             }
-            401 | 403 => Err(NavigraphError::NoSubscription),
+            401 => Err(NavigraphError::Unauthorized),
+            403 => Err(NavigraphError::NoSubscription),
             _ => Err(api_error(resp).await),
         }
     }
@@ -366,7 +369,8 @@ impl NavigraphClient {
             .await?;
         match resp.status().as_u16() {
             200 => Ok(resp.bytes().await?.to_vec()),
-            401 | 403 => Err(NavigraphError::NoSubscription),
+            401 => Err(NavigraphError::Unauthorized),
+            403 => Err(NavigraphError::NoSubscription),
             404 => Err(NavigraphError::Api {
                 status: 404,
                 body: "tile not found".into(),
@@ -427,6 +431,29 @@ pub fn parse_tile_cookies(headers: &reqwest::header::HeaderMap) -> TileCookies {
         }
     }
     cookies
+}
+
+/// The `subscriptions` claim of a JWT access token (`["charts", "fmsdata"]`).
+/// `None` when the token is not a JWT or carries no such claim, which must
+/// read as "unknown", never as "not subscribed": the API's own 403 is the
+/// authority.
+pub fn token_subscriptions(bearer: &Secret) -> Option<Vec<String>> {
+    jwt_strings(bearer, "subscriptions")
+}
+
+fn jwt_strings(bearer: &Secret, claim: &str) -> Option<Vec<String>> {
+    let payload = bearer.expose().split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    match v.get(claim)? {
+        serde_json::Value::Array(a) => Some(
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect(),
+        ),
+        serde_json::Value::String(s) => Some(s.split(' ').map(str::to_string).collect()),
+        _ => None,
+    }
 }
 
 /// The `scope` claim of a JWT access token, for diagnostics. `None` when the
@@ -507,6 +534,16 @@ mod tests {
             vec!["openid".to_string(), "fmsdata".to_string()]
         );
         assert!(token_scopes(&Secret::new("opaque")).is_none());
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"subscriptions":["charts","fmsdata"]}"#);
+        let jwt = Secret::new(format!("h.{payload}.s"));
+        assert_eq!(
+            token_subscriptions(&jwt).unwrap(),
+            vec!["charts", "fmsdata"]
+        );
+        assert!(
+            token_subscriptions(&Secret::new("h.e30.s")).is_none(),
+            "no claim"
+        );
     }
 
     #[test]

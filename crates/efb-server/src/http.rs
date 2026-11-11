@@ -13,6 +13,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tracing::debug;
 
+use crate::charts::codes;
+use crate::cmd::LEGACY_SOURCE;
 use crate::pairing::Redeem;
 use crate::providers::{MAX_TILE_ZOOM, TILE_LAYERS};
 use crate::server::Ctx;
@@ -128,6 +130,8 @@ pub(crate) async fn nav_tile(
     }
 }
 
+/// The pre-hub chart route (`nav.chartsIndex`'s `day_file`/`night_file`),
+/// served from the Navigraph source through the same lease.
 pub(crate) async fn nav_chart(
     State(ctx): State<Ctx>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -137,15 +141,53 @@ pub(crate) async fn nav_chart(
     if ctx.authorize(peer, params.token.as_deref()).await.is_none() {
         return unauthorized();
     }
-    let Some(nav) = ctx.providers.nav.as_ref() else {
-        return (StatusCode::NOT_FOUND, "no navigraph provider").into_response();
-    };
-    match nav.chart(&icao, &file).await {
-        // Licensed imagery: nothing keeps a copy.
-        Ok(bytes) => image("image/png", "no-store", bytes),
+    serve_chart(&ctx, LEGACY_SOURCE, &icao, &file).await
+}
+
+/// `/efb/charts/{source}/{icao}/{key}`: one chart image, only while the
+/// sim-session lease is live. A paired token is still required; the lease
+/// is on top of it, never instead of it.
+pub(crate) async fn chart_image(
+    State(ctx): State<Ctx>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Query(params): Query<TokenParam>,
+    Path((source, icao, key)): Path<(String, String, String)>,
+) -> Response {
+    if ctx.authorize(peer, params.token.as_deref()).await.is_none() {
+        return unauthorized();
+    }
+    serve_chart(&ctx, &source, &icao, &key).await
+}
+
+async fn serve_chart(ctx: &Ctx, source: &str, icao: &str, key: &str) -> Response {
+    match ctx.charts.image(source, icao, key).await {
+        // Licensed imagery: nothing downstream keeps a copy.
+        Ok(img) => (
+            [
+                (header::CONTENT_TYPE, img.content_type),
+                (header::CACHE_CONTROL, "no-store, private"),
+                (header::REFERRER_POLICY, "no-referrer"),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            ],
+            img.bytes.clone(),
+        )
+            .into_response(),
         Err(e) => {
-            debug!(icao, file, error = %e, "efb-server: nav chart failed");
-            (StatusCode::NOT_FOUND, "chart unavailable").into_response()
+            debug!(
+                source,
+                icao,
+                key,
+                code = e.code,
+                "efb-server: chart refused"
+            );
+            let status = match e.code.as_str() {
+                codes::LOCKED => StatusCode::FORBIDDEN,
+                codes::UNKNOWN_SOURCE | codes::UNKNOWN_IMAGE => StatusCode::NOT_FOUND,
+                codes::BAD_ICAO => StatusCode::BAD_REQUEST,
+                codes::RATE_LIMITED => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            (status, Json(e.to_json())).into_response()
         }
     }
 }

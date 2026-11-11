@@ -543,3 +543,167 @@ async fn static_spa_falls_back_to_index() {
         .unwrap();
     assert_eq!(body, "<h1>efb</h1>");
 }
+
+mod charts_lease {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::charts::{
+        ChartCategory, ChartEntry, ChartImage, ChartProvider, ChartSource, SimPresence, SourceState,
+    };
+
+    #[derive(Default)]
+    struct Presence {
+        sim: AtomicBool,
+        aircraft: AtomicBool,
+    }
+
+    impl SimPresence for Presence {
+        fn sim_running(&self) -> bool {
+            self.sim.load(Ordering::SeqCst)
+        }
+        fn aircraft_connected(&self) -> bool {
+            self.aircraft.load(Ordering::SeqCst)
+        }
+    }
+
+    struct OneChart;
+
+    #[async_trait]
+    impl ChartProvider for OneChart {
+        fn source(&self) -> ChartSource {
+            ChartSource {
+                id: "navigraph".into(),
+                name: "Navigraph".into(),
+                attribution: "Navigraph".into(),
+            }
+        }
+        async fn status(&self) -> SourceState {
+            SourceState::Ready
+        }
+        async fn index(&self, _icao: &str) -> Result<Vec<ChartEntry>, ProviderError> {
+            Ok(vec![ChartEntry {
+                id: "c1".into(),
+                index: "10-9".into(),
+                name: "AIRPORT".into(),
+                category: ChartCategory::Airport,
+                runways: vec![],
+                procedures: vec![],
+                day: Some("d.png".into()),
+                night: None,
+                width: None,
+                height: None,
+                georef: None,
+            }])
+        }
+        async fn image(&self, _icao: &str, key: &str) -> Result<ChartImage, ProviderError> {
+            Ok(ChartImage {
+                bytes: key.as_bytes().to_vec(),
+                content_type: "image/png",
+            })
+        }
+    }
+
+    async fn start() -> (EfbServer, SocketAddr, String, Arc<Presence>) {
+        let presence = Arc::new(Presence::default());
+        let providers = Providers {
+            charts: vec![Arc::new(OneChart)],
+            presence: Some(presence.clone()),
+            ..Providers::default()
+        };
+        let (srv, bind) = start_with(config(true, providers)).await;
+        let token = sign_pairing_token(&test_secret(), "tablet", 2_000_000_000).unwrap();
+        (srv, bind, token, presence)
+    }
+
+    async fn cmd_reply(ws: &mut Ws, name: &str) -> Value {
+        loop {
+            let v = next_json(ws).await;
+            if v["t"] == "cmd" && v["name"] == name {
+                return v["data"].clone();
+            }
+        }
+    }
+
+    async fn get(url: String) -> reqwest::Response {
+        reqwest::get(url).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn charts_follow_the_sim_session() {
+        let (_srv, bind, token, presence) = start().await;
+        let image = format!("http://{bind}/efb/charts/navigraph/KSFO/d.png?token={token}");
+        let legacy = format!("http://{bind}/efb/nav/chart/KSFO/d.png?token={token}");
+
+        // Sim closed: the token is valid, the lease is not.
+        let r = get(image.clone()).await;
+        assert_eq!(r.status(), 403);
+        assert_eq!(r.json::<Value>().await.unwrap()["code"], "charts_locked");
+        assert_eq!(get(legacy.clone()).await.status(), 403);
+
+        let mut panel = open_ws(bind, "insim").await;
+        next_json(&mut panel).await;
+        send_text(&mut panel, r#"{"t":"cmd","name":"charts.status"}"#).await;
+        let info = cmd_reply(&mut panel, "charts.info").await;
+        assert_eq!(info["access"]["reason"], "sim_not_running");
+        assert_eq!(info["sources"][0]["id"], "navigraph");
+
+        presence.sim.store(true, Ordering::SeqCst);
+        presence.aircraft.store(true, Ordering::SeqCst);
+        assert_eq!(
+            get(image.clone()).await.status(),
+            403,
+            "panel not checked in"
+        );
+
+        send_text(&mut panel, r#"{"t":"cmd","name":"charts.alive"}"#).await;
+        let access = cmd_reply(&mut panel, "charts.access").await;
+        assert_eq!(access, json!({ "live": true, "reason": null }));
+
+        send_text(
+            &mut panel,
+            r#"{"t":"cmd","name":"charts.index","data":{"source":"navigraph","icao":"ksfo"}}"#,
+        )
+        .await;
+        let index = cmd_reply(&mut panel, "charts.indexResult").await;
+        assert_eq!(index["ok"], true);
+        assert_eq!(index["icao"], "KSFO");
+        assert_eq!(index["charts"][0]["day"], "d.png");
+        assert_eq!(index["charts"][0]["category"], "APT");
+
+        let r = get(image.clone()).await;
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()["cache-control"], "no-store, private");
+        assert_eq!(r.bytes().await.unwrap().as_ref(), b"d.png");
+        assert_eq!(get(legacy).await.status(), 200);
+        let unlisted = format!("http://{bind}/efb/charts/navigraph/KSFO/x.png?token={token}");
+        assert_eq!(get(unlisted).await.status(), 404);
+        assert_eq!(
+            get(format!("http://{bind}/efb/charts/navigraph/KSFO/d.png"))
+                .await
+                .status(),
+            200,
+            "loopback bypass still applies to the panel itself"
+        );
+
+        // The aircraft unloads: revoked, and every EFB is told.
+        presence.aircraft.store(false, Ordering::SeqCst);
+        let access = cmd_reply(&mut panel, "charts.access").await;
+        assert_eq!(access["reason"], "aircraft_not_loaded");
+        assert_eq!(get(image).await.status(), 403);
+    }
+
+    #[tokio::test]
+    async fn no_presence_fails_closed() {
+        let providers = Providers {
+            charts: vec![Arc::new(OneChart)],
+            ..Providers::default()
+        };
+        let (_srv, bind) = start_with(config(true, providers)).await;
+        let mut panel = open_ws(bind, "insim").await;
+        next_json(&mut panel).await;
+        send_text(&mut panel, r#"{"t":"cmd","name":"charts.alive"}"#).await;
+        let r = get(format!("http://{bind}/efb/charts/navigraph/KSFO/d.png")).await;
+        assert_eq!(r.status(), 403);
+    }
+}

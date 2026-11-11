@@ -178,12 +178,33 @@ impl Navigraph {
 
     pub async fn charts_index(&self, icao: &str) -> Result<serde_json::Value> {
         let bearer = self.bearer().await?;
-        self.client.charts_index(&bearer, icao).await
+        match self.client.charts_index(&bearer, icao).await {
+            Err(NavigraphError::Unauthorized) => {
+                let bearer = self.fresh_bearer(&bearer).await?;
+                self.client.charts_index(&bearer, icao).await
+            }
+            other => other,
+        }
     }
 
     pub async fn chart_bytes(&self, icao: &str, filename: &str) -> Result<Vec<u8>> {
         let bearer = self.bearer().await?;
-        self.client.chart_bytes(&bearer, icao, filename).await
+        match self.client.chart_bytes(&bearer, icao, filename).await {
+            Err(NavigraphError::Unauthorized) => {
+                let bearer = self.fresh_bearer(&bearer).await?;
+                self.client.chart_bytes(&bearer, icao, filename).await
+            }
+            other => other,
+        }
+    }
+
+    /// A token Navigraph just refused, traded for a refreshed one. The
+    /// access token can be revoked before its stated expiry (a sign-in
+    /// elsewhere, a clock skew), and that must read as a retry, not as a
+    /// lost subscription.
+    async fn fresh_bearer(&self, rejected: &Secret) -> Result<Secret> {
+        self.tokens.expire(rejected).await;
+        self.bearer().await
     }
 
     pub async fn tile_bytes(&self, layer: &str, z: u8, x: u32, y: u32) -> Result<Vec<u8>> {

@@ -20,6 +20,7 @@ use tokio_util::task::TaskTracker;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::{debug, info, warn};
 
+use crate::charts::hub::ChartsHub;
 use crate::dto::{EfbConnectedClient, EfbStatus};
 use crate::error::EfbError;
 use crate::pairing::{
@@ -116,6 +117,8 @@ struct Running {
 pub(crate) struct Ctx {
     pub(crate) shared: Arc<Shared>,
     pub(crate) providers: Providers,
+    /// Every chart request goes through here, lease first.
+    pub(crate) charts: Arc<ChartsHub>,
     loopback_bypass: bool,
     idle_timeout: Duration,
     token: CancellationToken,
@@ -317,9 +320,19 @@ impl EfbServer {
 
         let token = CancellationToken::new();
         let tasks = TaskTracker::new();
+        let charts = Arc::new(ChartsHub::new(
+            config.providers.charts.clone(),
+            config.providers.presence.clone(),
+        ));
+        tasks.spawn(watch_charts_access(
+            charts.clone(),
+            self.shared.state.clone(),
+            token.clone(),
+        ));
         let ctx = Ctx {
             shared: self.shared.clone(),
             providers: config.providers.clone(),
+            charts,
             loopback_bypass: config.loopback_bypass,
             idle_timeout: config.idle_timeout,
             token: token.clone(),
@@ -382,6 +395,39 @@ impl EfbServer {
     }
 }
 
+/// How often the lease is re-read for `charts.access` pushes. Requests check
+/// it themselves; this only tells open EFBs, and drops the caches.
+const ACCESS_POLL: Duration = Duration::from_secs(1);
+
+/// Pushes `charts.access` to every client whenever the lease changes, and
+/// purges every cached chart the moment it locks.
+async fn watch_charts_access(charts: Arc<ChartsHub>, state: EfbState, stop: CancellationToken) {
+    if !charts.has_sources() {
+        return;
+    }
+    let mut last = None;
+    let mut tick = tokio::time::interval(ACCESS_POLL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            () = stop.cancelled() => return,
+        }
+        let access = charts.access();
+        if last == Some(access) {
+            continue;
+        }
+        if !access.live {
+            charts.purge().await;
+        }
+        if last.is_some() || access.live {
+            info!(live = access.live, reason = ?access.reason, "efb-server: charts lease changed");
+        }
+        last = Some(access);
+        state.forward_cmd("charts.access", serde_json::json!(access), None);
+    }
+}
+
 fn router(ctx: Ctx, static_dir: Option<&std::path::Path>) -> Router {
     let app = Router::new()
         .route("/health", get(http::health))
@@ -390,6 +436,7 @@ fn router(ctx: Ctx, static_dir: Option<&std::path::Path>) -> Router {
         .route("/efb/doc/{id}/page/{page}", get(http::doc_page))
         .route("/efb/nav/tile/{layer}/{z}/{x}/{y}", get(http::nav_tile))
         .route("/efb/nav/chart/{icao}/{file}", get(http::nav_chart))
+        .route("/efb/charts/{source}/{icao}/{key}", get(http::chart_image))
         .route("/efb/browser/{session}/frame.jpg", get(http::browser_frame))
         .with_state(ctx);
     match static_dir {
@@ -430,11 +477,12 @@ async fn ws_upgrade(
     };
     let id = ctx.shared.next_client.fetch_add(1, Ordering::Relaxed);
     let (kick, kicked) = oneshot::channel();
+    let loopback = peer.ip().to_canonical().is_loopback();
     let entry = ClientEntry {
         device: device.clone(),
         addr: peer,
         connected_at: Instant::now(),
-        loopback: peer.ip().to_canonical().is_loopback(),
+        loopback,
         kick: Some(kick),
     };
     debug!(id, device, %peer, "efb-server: ws upgrade accepted");
@@ -443,7 +491,7 @@ async fn ws_upgrade(
         tasks.track_future(async move {
             ctx.shared.clients.lock().await.insert(id, entry);
             ctx.shared.changed();
-            client_loop(&ctx, socket, id, kicked).await;
+            client_loop(&ctx, socket, id, loopback, kicked).await;
             ctx.shared.clients.lock().await.remove(&id);
             ctx.shared.changed();
             debug!(id, device, "efb-server: client gone");
@@ -485,6 +533,7 @@ async fn client_loop(
     ctx: &Ctx,
     socket: WebSocket,
     id: ClientId,
+    loopback: bool,
     mut kicked: oneshot::Receiver<()>,
 ) {
     let state = &ctx.shared.state;
@@ -512,9 +561,17 @@ async fn client_loop(
                             continue;
                         };
                         let reply = match frame {
-                            Incoming::Sim { data } => { state.apply_sim_delta(data).await; None }
+                            Incoming::Sim { data } => {
+                                // Only the in-sim panel publishes telemetry,
+                                // and only from this machine.
+                                if loopback {
+                                    ctx.charts.panel_alive();
+                                }
+                                state.apply_sim_delta(data).await;
+                                None
+                            }
                             Incoming::Ui { data } => { state.apply_ui_delta(data, Some(id)).await; None }
-                            Incoming::Cmd { name, data } => { cmd::handle(ctx, id, name, data); None }
+                            Incoming::Cmd { name, data } => { cmd::handle(ctx, id, loopback, name, data); None }
                             Incoming::Resync => {
                                 let snap = state.snapshot_frame().await;
                                 seen = Seen::from_snapshot(&snap);

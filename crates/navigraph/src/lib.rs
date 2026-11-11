@@ -28,7 +28,7 @@ mod tests;
 pub use account::Navigraph;
 pub use client::{
     AppCredentials, DeviceAuth, Endpoints, NavTokens, NavigraphClient, Pkce, Poll, SCOPES,
-    TileCookies, parse_tile_cookies, token_scopes,
+    TileCookies, parse_tile_cookies, token_scopes, token_subscriptions,
 };
 pub use error::{NavigraphError, Result};
 pub use infinity_ipc::navigraph::{
