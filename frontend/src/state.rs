@@ -75,6 +75,17 @@ impl AppState {
                 .with(|e| e.as_ref().is_some_and(|e| e.products.contains(&product.id)))
     }
 
+    /// The product's name for this account: the catalog's first
+    /// `nameByOwnership` rule it owns, else its plain name
+    /// (`Product::name_for`). Read inside a view's closure it follows the
+    /// account, so a sign-in or a purchase renames it in place.
+    pub fn product_name(self, product: &Product) -> String {
+        self.entitlements.with(|e| {
+            let owned = e.as_ref().map_or(&[][..], |e| e.products.as_slice());
+            product.name_for(owned).to_owned()
+        })
+    }
+
     pub fn reduce_motion(self) -> Signal<bool> {
         Signal::derive(move || {
             let sim_running = self.sim.get().running.is_some();

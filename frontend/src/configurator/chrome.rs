@@ -264,7 +264,7 @@ pub(crate) fn Chrome(product: Product, product_ref: ProductRef) -> impl IntoView
     );
     let schema_ok = spec.as_ref().is_some_and(|c| c.schema.is_array());
     let has_bridges = !product.bridges.is_empty();
-    let name = product.name.clone();
+    let name = app.product_name(&product);
     let extension_panels = crate::ext::use_extensions()
         .configurator
         .iter()

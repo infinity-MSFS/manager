@@ -43,6 +43,35 @@ pub struct Product {
     /// the manager leaves the presets alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<PresetGating>,
+    /// The product's name for an account that owns more than its base, in
+    /// order: the first rule whose `requires` the account owns names it
+    /// ([`Product::name_for`]), and [`Product::name`] names it for everyone
+    /// else — signed out, a base owner, and a manager too old to know this
+    /// field. Display only, like [`PresetGating`]: it unlocks nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub name_by_ownership: Vec<OwnershipName>,
+}
+
+/// One [`Product::name_by_ownership`] rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipName {
+    /// The product the account must own, as in
+    /// [`EntitlementsResponse::products`].
+    pub requires: ProductId,
+    /// The name it is shown under when it does.
+    pub name: String,
+}
+
+impl Product {
+    /// The name an account owning `owned` sees — see
+    /// [`Product::name_by_ownership`].
+    pub fn name_for(&self, owned: &[ProductId]) -> &str {
+        self.name_by_ownership
+            .iter()
+            .find(|rule| owned.contains(&rule.requires))
+            .map_or(self.name.as_str(), |rule| rule.name.as_str())
+    }
 }
 
 /// Preset visibility: the manager writes `isUserSelectable` into each
@@ -560,5 +589,56 @@ mod tests {
             serde_json::to_string(&ArchiveFormat::TarZst).unwrap(),
             "\"tarzst\""
         );
+    }
+
+    /// The DC-10's names (operator, 18 Nov 2026): "DC-10 Series" for the
+    /// base, "DC-10 Premium Series" with the premium, "DC-10 / MD-10 Series"
+    /// with the MD-10 — the first rule the account owns wins, so the MD-10's
+    /// comes first.
+    #[test]
+    fn a_product_is_named_by_the_first_rule_the_account_owns() {
+        let product: Product = serde_json::from_value(serde_json::json!({
+            "id": "aerodynamics-dc10", "name": "DC-10 Series", "category": "aircraft",
+            "vendor": "v", "version": "1.0.0", "ownership": { "kind": "free" },
+            "package": { "kind": "generic", "archive": { "format": "zip", "key": "a.zip" } },
+            "nameByOwnership": [
+                { "requires": "aerodynamics-md10", "name": "DC-10 / MD-10 Series" },
+                { "requires": "aerodynamics-dc10-prem", "name": "DC-10 Premium Series" }
+            ]
+        }))
+        .unwrap();
+        let owns = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(product.name_for(&[]), "DC-10 Series", "signed out");
+        assert_eq!(
+            product.name_for(&owns(&["aerodynamics-dc10"])),
+            "DC-10 Series"
+        );
+        assert_eq!(
+            product.name_for(&owns(&["aerodynamics-dc10", "aerodynamics-dc10-prem"])),
+            "DC-10 Premium Series"
+        );
+        assert_eq!(
+            product.name_for(&owns(&[
+                "aerodynamics-dc10",
+                "aerodynamics-dc10-prem",
+                "aerodynamics-md10"
+            ])),
+            "DC-10 / MD-10 Series"
+        );
+    }
+
+    #[test]
+    fn a_catalog_without_names_by_ownership_still_parses_and_says_nothing_new() {
+        let product: Product = serde_json::from_value(serde_json::json!({
+            "id": "p", "name": "P", "category": "aircraft", "vendor": "v",
+            "version": "1.0.0", "ownership": { "kind": "free" },
+            "package": { "kind": "generic", "archive": { "format": "zip", "key": "a.zip" } }
+        }))
+        .unwrap();
+        assert!(product.name_by_ownership.is_empty());
+        assert_eq!(product.name_for(&["anything".to_string()]), "P");
+        // An empty rule list is left out when the catalog is written back.
+        let written = serde_json::to_value(&product).unwrap();
+        assert!(written.get("nameByOwnership").is_none());
     }
 }

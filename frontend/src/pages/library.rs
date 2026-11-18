@@ -122,6 +122,9 @@ fn ProductRow(index: usize, product: Product, channel: Channel) -> impl IntoView
     };
     let installed = app.installed_package(product.id.clone());
     let id = StoredValue::new(product.id.clone());
+    // The name the account sees, followed live (`AppState::product_name`).
+    let named = StoredValue::new(product.clone());
+    let shown_name = move || named.with_value(|p| app.product_name(p));
     // Re-measured whenever the installed version changes.
     let size = LocalResource::new(move || {
         let version = installed.get().map(|p| p.version);
@@ -182,7 +185,7 @@ fn ProductRow(index: usize, product: Product, channel: Channel) -> impl IntoView
                         view! {
                             <img
                                 src=src
-                                alt=product.name.clone()
+                                alt=shown_name
                                 class="h-full w-full object-cover transition-transform duration-700 group-hover:scale-[1.03]"
                             />
                         }
@@ -203,7 +206,7 @@ fn ProductRow(index: usize, product: Product, channel: Channel) -> impl IntoView
                     <span class="text-accent-400/80">{format!("{index:02}")}</span>
                     <span class=cn!(EYEBROW, "text-white/60")>{status}</span>
                 </div>
-                <h2 class="text-2xl font-medium tracking-tight">{product.name.clone()}</h2>
+                <h2 class="text-2xl font-medium tracking-tight">{shown_name}</h2>
                 <p class="mt-1 mb-4 text-sm font-light text-white/45">
                     {format!("{} · v{}", product.vendor, product.version)}
                     {move || size.get().flatten().map(|b| format!(" · {} on disk", human_bytes(b)))}
@@ -220,7 +223,7 @@ fn ProductRow(index: usize, product: Product, channel: Channel) -> impl IntoView
                     })}
                 <InstallControls
                     id=product.id.clone()
-                    name=product.name.clone()
+                    name=app.product_name(&product)
                     latest=product.version.clone()
                     channel=channel
                     coming_soon=product.coming_soon

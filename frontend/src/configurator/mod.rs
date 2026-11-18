@@ -57,7 +57,7 @@ pub(crate) fn ConfigurePage() -> impl IntoView {
                                     None => view! { <Missing title="Unknown product" detail=format!("No catalog entry for \u{201c}{id}\u{201d}.") /> }
                                         .into_any(),
                                     Some(p) if p.configurator.is_none() => view! {
-                                        <Missing title=p.name.clone() detail="This product doesn\u{2019}t ship a configurator yet." />
+                                        <Missing title=app.product_name(&p) detail="This product doesn\u{2019}t ship a configurator yet." />
                                     }
                                         .into_any(),
                                     Some(p) => {
