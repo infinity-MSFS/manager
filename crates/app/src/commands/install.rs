@@ -95,25 +95,53 @@ pub(crate) async fn installed_size(
 
 #[tauri::command]
 pub(crate) async fn install_start(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     prefs: State<'_, PreferencesStore>,
     installer: State<'_, Installer>,
     args: Args<cmd::InstallStart>,
 ) -> Out<cmd::InstallStart> {
-    let plan = request_plan(&state, &prefs, &args).await?;
+    let plan = request_plan_rechecked(&app, &state, &prefs, &args).await?;
     installer.start(plan)
 }
 
 /// Checks an installed product file by file and repairs it.
 #[tauri::command]
 pub(crate) async fn install_verify(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     prefs: State<'_, PreferencesStore>,
     installer: State<'_, Installer>,
     args: Args<cmd::InstallVerify>,
 ) -> Out<cmd::InstallVerify> {
-    let plan = request_plan(&state, &prefs, &args).await?;
+    let plan = request_plan_rechecked(&app, &state, &prefs, &args).await?;
     installer.verify(plan)
+}
+
+/// A download refused as not owned may be a purchase or role newer than
+/// the session's token: renew it once and ask again before failing.
+async fn request_plan_rechecked(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    prefs: &PreferencesStore,
+    args: &InstallRequest,
+) -> IpcResult<Plan> {
+    match request_plan(state, prefs, args).await {
+        Err(e) if e.code == IpcErrorCode::NotOwned => {
+            match crate::recheck::if_due(app, crate::recheck::ON_DEMAND).await {
+                Some(Ok(_)) => {
+                    tracing::info!(product = args.product_id, "not owned: retrying with a renewed token");
+                    request_plan(state, prefs, args).await
+                }
+                Some(Err(renew)) => {
+                    tracing::warn!(code = %renew.code, "entitlement recheck failed");
+                    Err(e)
+                }
+                None => Err(e),
+            }
+        }
+        result => result,
+    }
 }
 
 async fn request_plan(

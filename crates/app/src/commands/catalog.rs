@@ -36,3 +36,16 @@ pub(crate) async fn account_entitlements(
 ) -> Out<cmd::AccountEntitlements> {
     state.providers.content.entitlements().await
 }
+
+/// Refresh purchases. Inside the throttle a repeat press answers from the
+/// current token rather than spending another renewal.
+#[tauri::command]
+pub(crate) async fn account_refresh(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Out<cmd::AccountRefresh> {
+    match crate::recheck::if_due(&app, crate::recheck::ON_DEMAND).await {
+        Some(result) => result,
+        None => state.providers.content.entitlements().await,
+    }
+}

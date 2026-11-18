@@ -16,6 +16,13 @@ pub trait IdentityProvider: Send + Sync + std::fmt::Debug {
     async fn complete_login(&self, callback: &url::Url) -> IpcResult<SessionState>;
     async fn logout(&self) -> IpcResult<()>;
     async fn access_token(&self) -> IpcResult<AccessToken>;
+    /// Replaces the access token now, even if the cached one is still
+    /// fresh, so claims granted since it was issued (a purchase, a role)
+    /// apply without signing out and in. One token-endpoint call; callers
+    /// throttle. Providers without renewable sessions do nothing.
+    async fn renew(&self) -> IpcResult<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

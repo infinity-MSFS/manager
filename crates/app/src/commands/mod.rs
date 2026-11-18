@@ -40,6 +40,7 @@ handlers![
     catalog::catalog_changelog,
     catalog::catalog_liveries,
     catalog::account_entitlements,
+    catalog::account_refresh,
     auth::auth_session,
     auth::auth_begin_login,
     auth::auth_logout,

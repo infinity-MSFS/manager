@@ -519,7 +519,7 @@ pub struct EfbDocMeta {
 }
 
 /// Worker `POST /v1/entitlements` response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntitlementsResponse {
     pub products: Vec<ProductId>,
     #[serde(default)]

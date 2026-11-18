@@ -7,7 +7,8 @@ use infinity_ipc::dto::{
     SimStatus,
 };
 use infinity_ipc::events::{
-    InstalledChanged, JobChanged, PreferencesChanged, SessionChanged, SimStatusChanged,
+    EntitlementsChanged, InstalledChanged, JobChanged, PreferencesChanged, SessionChanged,
+    SimStatusChanged,
 };
 use leptos::prelude::*;
 
@@ -161,6 +162,8 @@ pub(crate) fn provide_app_state() {
         });
     });
     ipc::listen::<SessionChanged>(move |s| state.session.set(s));
+    // A recheck (window focus, a refused download, Refresh purchases).
+    ipc::listen::<EntitlementsChanged>(move |e| state.entitlements.set(e));
     ipc::listen::<PreferencesChanged>(move |p| state.prefs.set(p));
     ipc::listen::<SimStatusChanged>(move |s| state.sim.set(s));
     ipc::listen::<JobChanged>(move |job| state.apply_job(job));

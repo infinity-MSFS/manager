@@ -16,6 +16,17 @@ pub(super) fn Account() -> impl IntoView {
     let sign_out = Action::new_local(move |(): &()| async move {
         error.set(ipc::invoke::<cmd::AuthLogout>(&()).await.err());
     });
+    // A purchase or role granted since sign-in, without signing out and in.
+    // The backend also does this on its own when the window regains focus.
+    let refresh = Action::new_local(move |(): &()| async move {
+        match ipc::invoke::<cmd::AccountRefresh>(&()).await {
+            Ok(owned) => {
+                app.entitlements.set(owned);
+                error.set(None);
+            }
+            Err(e) => error.set(Some(e)),
+        }
+    });
     let owned = move || {
         app.entitlements.with(|e| match e {
             Some(e) if e.products.is_empty() => "None yet".to_owned(),
@@ -32,7 +43,17 @@ pub(super) fn Account() -> impl IntoView {
                     <Field label="Email" value=profile.email.clone().unwrap_or_default() />
                     <Field label="Products" value=owned() />
                 </dl>
-                <div class="mt-4">
+                <div class="mt-4 flex gap-2">
+                    <Button
+                        variant=Variant::Ghost
+                        icon=icons::REFRESH_CW
+                        loading=refresh.pending()
+                        on_click=Callback::new(move |()| {
+                            refresh.dispatch(());
+                        })
+                    >
+                        "Refresh purchases"
+                    </Button>
                     <Button
                         variant=Variant::Ghost
                         tone=Tone::Danger

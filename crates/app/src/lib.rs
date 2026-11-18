@@ -8,6 +8,7 @@ mod efb_presence;
 mod events;
 mod paths;
 mod presets;
+mod recheck;
 mod simbrief_gauge;
 mod state;
 mod telemetry;
@@ -161,6 +162,8 @@ impl Builder {
                 deep_link::install(app.handle())?;
                 window_geometry::repair(app.handle());
                 tray::install(app.handle())?;
+                app.manage(recheck::Recheck::new());
+                recheck::on_focus(app.handle());
                 start_sim_services(app.handle());
                 presets::on_startup(app.handle());
                 Ok(())

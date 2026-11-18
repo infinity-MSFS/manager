@@ -1,9 +1,13 @@
+use crate::catalog;
 use crate::define_events;
 use crate::dto;
 
 define_events! {
     /// Sign-in state changed: login completed, refresh failed, or logout.
     "auth:session" => SessionChanged(dto::SessionState);
+    /// What the account owns, after the manager rechecked it (window focus,
+    /// a refused download, or Refresh purchases). `None` when signed out.
+    "account:entitlements" => EntitlementsChanged(Option<catalog::EntitlementsResponse>);
     /// Preferences were saved.
     "prefs:changed" => PreferencesChanged(dto::Preferences);
     /// A simulator started or stopped.

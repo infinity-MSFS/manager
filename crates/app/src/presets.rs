@@ -39,6 +39,13 @@ pub fn session_changed(app: &tauri::AppHandle, state: &SessionState) {
     tauri::async_runtime::spawn(async move { apply_installed(&app).await });
 }
 
+/// After a recheck found the account owns something different (a purchase
+/// or a role granted since sign-in): presets it now owns become selectable.
+pub(crate) fn entitlements_changed(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move { apply_installed(&app).await });
+}
+
 /// Once at startup.
 pub(crate) fn on_startup(app: &tauri::AppHandle) {
     let app = app.clone();

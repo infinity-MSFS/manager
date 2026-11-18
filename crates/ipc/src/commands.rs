@@ -16,6 +16,10 @@ define_commands! {
     /// What the signed-in account owns. `None` when this build has no
     /// store, in which case only free products are available.
     account_entitlements => AccountEntitlements(()) -> Option<catalog::EntitlementsResponse>;
+    /// Renews the session's token so purchases and roles granted since
+    /// sign-in apply, then rechecks what the account owns. Also broadcast
+    /// as [`crate::events::EntitlementsChanged`].
+    account_refresh => AccountRefresh(()) -> Option<catalog::EntitlementsResponse>;
 
     /// Build, version and platform.
     app_info => AppInfo(()) -> dto::AppInfo;

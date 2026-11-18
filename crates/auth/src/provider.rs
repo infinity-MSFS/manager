@@ -198,12 +198,26 @@ impl IdentityProvider for PkceIdentity {
         if let Some(token) = self.fresh_token().await {
             return Ok(token);
         }
+        self.refresh(false).await
+    }
+
+    async fn renew(&self) -> IpcResult<()> {
+        self.refresh(true).await.map(drop)
+    }
+}
+
+impl PkceIdentity {
+    /// Spends the refresh token for a new access token. Without `force`, a
+    /// token another caller refreshed while we waited is used instead.
+    async fn refresh(&self, force: bool) -> IpcResult<AccessToken> {
         let _refreshing = self.refreshing.lock().await;
         // Whoever held the gate before us may have refreshed already.
         let (generation, refresh_token) = {
             let state = self.state.lock().await;
             match &state.tokens {
-                Some(t) if t.is_fresh() => return Ok(AccessToken::new(t.access_token.clone())),
+                Some(t) if !force && t.is_fresh() => {
+                    return Ok(AccessToken::new(t.access_token.clone()));
+                }
                 Some(t) => (state.generation, t.refresh_token.clone()),
                 None => (state.generation, None),
             }
@@ -356,6 +370,26 @@ mod tests {
             assert_eq!(call.await.unwrap().unwrap().expose(), "access-1");
         }
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(p.store.load().unwrap().as_deref(), Some("refresh-1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renew_replaces_a_fresh_token() {
+        let (token_url, hits) = token_server();
+        let mut p = provider();
+        p.cfg.endpoints.token = token_url;
+        p.state.lock().await.tokens = Some(Tokens {
+            expires_at: wire::now() + 3600,
+            ..expired("refresh-0")
+        });
+
+        // Fresh: plain access_token reuses it and spends nothing.
+        p.access_token().await.unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        p.renew().await.unwrap();
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(p.access_token().await.unwrap().expose(), "access-1");
         assert_eq!(p.store.load().unwrap().as_deref(), Some("refresh-1"));
     }
 
