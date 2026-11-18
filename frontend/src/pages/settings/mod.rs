@@ -6,7 +6,7 @@ pub(super) mod supervisor;
 
 use infinity_ipc::IpcError;
 use infinity_ipc::commands as cmd;
-use infinity_ipc::dto::{MotionPreference, Preferences};
+use infinity_ipc::dto::{CloseBehavior, MotionPreference, Preferences};
 use infinity_ui::prelude::*;
 
 use super::{ErrorNote, Page};
@@ -90,7 +90,10 @@ pub(crate) fn Settings() -> impl IntoView {
             <div class="h-10"></div>
             <Motion />
             <Gap />
-            <SectionLabel num=num(10 + extra) label="About this build" />
+            <SectionLabel num=num(10 + extra) label="Window" />
+            <CloseOption />
+            <Gap />
+            <SectionLabel num=num(11 + extra) label="About this build" />
             {move || {
                 let info = app.info.get();
                 let caps = app.capabilities.get();
@@ -197,6 +200,66 @@ fn Motion() -> impl IntoView {
                                 on:click=move |_| {
                                     save.dispatch(value);
                                 }
+                            >
+                                <span class=move || {
+                                    cn!(EYEBROW, if selected() { "text-white" } else { "text-white/50" })
+                                }>{label}</span>
+                                <span class="text-sm font-light text-white/55">{hint}</span>
+                            </button>
+                        }
+                    })
+                    .collect_view()}
+            </div>
+            {move || error.get().map(|e| view! { <div class="mt-4"><ErrorNote error=e /></div> })}
+        </div>
+    }
+}
+
+const CLOSE_OPTIONS: [(CloseBehavior, &str, &str); 3] = [
+    (
+        CloseBehavior::Ask,
+        "Ask",
+        "Choose between exiting and the tray each time.",
+    ),
+    (
+        CloseBehavior::Tray,
+        "Close to tray",
+        "Keep running in the tray, serving aircraft.",
+    ),
+    (CloseBehavior::Exit, "Exit", "Quit the manager."),
+];
+
+/// What the titlebar's close button does; also where "Remember my choice"
+/// in the close prompt is undone. While an aircraft is using the manager
+/// the prompt shows regardless.
+#[component]
+fn CloseOption() -> impl IntoView {
+    let app = use_app();
+    let error = RwSignal::new(None::<IpcError>);
+    let current = move || app.prefs.with(|p| p.close_behavior);
+
+    view! {
+        <div class="max-w-2xl">
+            <div class="mb-4 flex items-baseline justify-between">
+                <span class="text-lg font-light">"Closing the window"</span>
+                <span class="font-mono text-[11px] text-white/40">"Always asks while an aircraft is connected"</span>
+            </div>
+            <div class="grid grid-cols-3 border-t border-white/10">
+                {CLOSE_OPTIONS
+                    .into_iter()
+                    .map(|(value, label, hint)| {
+                        let selected = move || current() == value;
+                        view! {
+                            <button
+                                type="button"
+                                aria-pressed=move || selected().to_string()
+                                class=move || {
+                                    cn!(
+                                        "flex flex-col gap-1 border-b py-4 pr-4 text-left transition-colors",
+                                        if selected() { "border-accent-400" } else { "border-white/10 hover:border-white/30" },
+                                    )
+                                }
+                                on:click=move |_| save_prefs(app, error, |p| p.close_behavior = value)
                             >
                                 <span class=move || {
                                     cn!(EYEBROW, if selected() { "text-white" } else { "text-white/50" })

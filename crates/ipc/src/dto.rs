@@ -131,6 +131,10 @@ pub struct Preferences {
     /// The first-run wizard was finished or skipped. Same key as v3.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub first_run_complete: bool,
+    /// What the titlebar's close button does. Same name as v3's
+    /// `closeBehavior` (v3 kept it in the webview's localStorage).
+    #[serde(default, skip_serializing_if = "CloseBehavior::is_default")]
+    pub close_behavior: CloseBehavior,
     #[serde(flatten)]
     pub rest: serde_json::Map<String, serde_json::Value>,
 }
@@ -152,6 +156,27 @@ pub enum Theme {
 impl Theme {
     pub fn is_default(&self) -> bool {
         *self == Self::Dark
+    }
+}
+
+/// What closing the window does. A remembered choice applies only while no
+/// aircraft is using the manager: with one connected the user is always
+/// asked, since exiting cuts the aircraft off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    /// Ask every time: exit, or keep running in the tray.
+    #[default]
+    Ask,
+    /// Hide to the tray; the manager keeps serving aircraft.
+    Tray,
+    /// Quit the manager.
+    Exit,
+}
+
+impl CloseBehavior {
+    pub fn is_default(&self) -> bool {
+        *self == Self::Ask
     }
 }
 

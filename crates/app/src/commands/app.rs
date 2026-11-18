@@ -24,3 +24,15 @@ pub(crate) async fn app_info(
 pub(crate) async fn capabilities(state: State<'_, AppState>) -> Out<cmd::Capabilities> {
     Ok(state.providers.capabilities())
 }
+
+#[tauri::command]
+pub(crate) async fn app_in_use(app: tauri::AppHandle) -> Out<cmd::AppInUse> {
+    Ok(crate::tray::in_use(&app).await)
+}
+
+#[tauri::command]
+pub(crate) async fn app_exit(app: tauri::AppHandle) -> Out<cmd::AppExit> {
+    tracing::info!("app_exit: quit from the window");
+    app.exit(0);
+    Ok(())
+}

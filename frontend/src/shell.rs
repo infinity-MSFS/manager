@@ -1,5 +1,5 @@
 use infinity_ipc::commands as cmd;
-use infinity_ipc::dto::SessionState;
+use infinity_ipc::dto::{CloseBehavior, SessionState};
 use infinity_ui::prelude::*;
 use infinity_ui::{AccountItem, AccountMenu, TopNav, TopNavItem};
 use leptos_router::hooks::{use_location, use_navigate};
@@ -9,11 +9,16 @@ use crate::editorial::EYEBROW;
 use crate::ext::use_extensions;
 use crate::ipc;
 use crate::routes;
-use crate::state::use_app;
+use crate::state::{AppState, use_app};
 use crate::window::{WindowAction, perform};
 
 #[component]
 pub(crate) fn TitleBar() -> impl IntoView {
+    let app = use_app();
+    // `Some(in_use)` while the close prompt is open.
+    let prompt = RwSignal::new(None::<bool>);
+    let press = |action: WindowAction| Callback::new(move |()| perform(action));
+
     view! {
         <header
             data-tauri-drag-region
@@ -25,26 +30,135 @@ pub(crate) fn TitleBar() -> impl IntoView {
                 <span class=cn!("pointer-events-none", EYEBROW)>"Infinity Manager"</span>
             </div>
             <div class="flex h-full justify-self-end">
-                <ChromeButton label="Minimize" action=WindowAction::Minimize>
+                <ChromeButton label="Minimize" on_press=press(WindowAction::Minimize)>
                     <Icon icon=icons::MINUS class="h-4 w-4" />
                 </ChromeButton>
-                <ChromeButton label="Maximize" action=WindowAction::ToggleMaximize>
+                <ChromeButton label="Maximize" on_press=press(WindowAction::ToggleMaximize)>
                     <svg viewBox="0 0 24 24" class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="4" y="4" width="16" height="16" rx="1" />
                     </svg>
                 </ChromeButton>
-                <ChromeButton label="Close" action=WindowAction::Close danger=true>
+                <ChromeButton
+                    label="Close"
+                    on_press=Callback::new(move |()| request_close(app, prompt))
+                    danger=true
+                >
                     <Icon icon=icons::X class="h-4 w-4" />
                 </ChromeButton>
             </div>
         </header>
+        // A sibling, never a child: the header's `backdrop-filter` makes it
+        // the containing block for `position: fixed`, which would pin the
+        // modal's overlay to the 36px titlebar instead of the window.
+        <CloseDialog prompt=prompt />
+    }
+}
+
+/// The close button, as in v3: a remembered choice is applied straight away
+/// only while no aircraft is using the manager. With one connected (or when
+/// that cannot be told) the prompt always shows, so exiting is never silent.
+fn request_close(app: AppState, prompt: RwSignal<Option<bool>>) {
+    let behavior = app.prefs.with_untracked(|p| p.close_behavior);
+    leptos::task::spawn_local(async move {
+        let in_use = ipc::invoke::<cmd::AppInUse>(&()).await;
+        match (behavior, &in_use) {
+            (CloseBehavior::Tray | CloseBehavior::Exit, Ok(false)) => apply_close(behavior),
+            _ => prompt.set(Some(matches!(in_use, Ok(true)))),
+        }
+    });
+}
+
+fn apply_close(behavior: CloseBehavior) {
+    match behavior {
+        // The window's close is intercepted by the backend and hides it to
+        // the tray; quitting needs its own command.
+        CloseBehavior::Exit => leptos::task::spawn_local(async {
+            if let Err(e) = ipc::invoke::<cmd::AppExit>(&()).await {
+                ipc::warn(&format!("exit: {}", e.message));
+            }
+        }),
+        CloseBehavior::Tray | CloseBehavior::Ask => perform(WindowAction::Close),
+    }
+}
+
+#[component]
+fn CloseDialog(prompt: RwSignal<Option<bool>>) -> impl IntoView {
+    let app = use_app();
+    let remember = RwSignal::new(false);
+    let open = Signal::derive(move || prompt.with(Option::is_some));
+    let in_use = Signal::derive(move || prompt.get().unwrap_or(false));
+
+    let dismiss = Callback::new(move |()| {
+        prompt.set(None);
+        remember.set(false);
+    });
+    let choose = move |behavior: CloseBehavior| {
+        Callback::new(move |()| {
+            // Never remember a choice made while an aircraft is connected:
+            // the warning exists so that one is not applied unseen next time.
+            let keep = remember.get_untracked() && !in_use.get_untracked();
+            prompt.set(None);
+            remember.set(false);
+            leptos::task::spawn_local(async move {
+                if keep {
+                    let mut prefs = app.prefs.get_untracked();
+                    prefs.close_behavior = behavior;
+                    if let Err(e) = ipc::invoke::<cmd::PrefsSave>(&prefs).await {
+                        ipc::warn(&format!("remember close choice: {}", e.message));
+                    }
+                }
+                apply_close(behavior);
+            });
+        })
+    };
+    let exit = choose(CloseBehavior::Exit);
+    let tray = choose(CloseBehavior::Tray);
+
+    let footer = ViewFn::from(move || {
+        view! {
+            <Button variant=Variant::Ghost size=Size::Md on_click=dismiss>
+                "Cancel"
+            </Button>
+            <Button variant=Variant::Soft tone=Tone::Danger size=Size::Md on_click=exit>
+                "Exit app"
+            </Button>
+            <Button variant=Variant::Solid size=Size::Md on_click=tray>
+                "Close to tray"
+            </Button>
+        }
+    });
+
+    view! {
+        <Modal
+            open=open
+            on_close=dismiss
+            title="Close Infinity Manager?"
+            width="max-w-md"
+            footer=footer
+        >
+            <div class="flex flex-col gap-4">
+                <Show when=move || in_use.get()>
+                    <Callout tone=Tone::Warning title="An aircraft is using Infinity Manager">
+                        "Exiting the app deactivates the aircraft until you open the manager again. Close to tray keeps it running."
+                    </Callout>
+                </Show>
+                <p class="font-light text-white/75">"Do you want to exit the app or close it to the tray?"</p>
+                <Show when=move || !in_use.get()>
+                    <Checkbox
+                        checked=remember
+                        on_change=Callback::new(move |on: bool| remember.set(on))
+                        label="Remember my choice"
+                    />
+                </Show>
+            </div>
+        </Modal>
     }
 }
 
 #[component]
 fn ChromeButton(
     label: &'static str,
-    action: WindowAction,
+    on_press: Callback<()>,
     #[prop(optional)] danger: bool,
     children: Children,
 ) -> impl IntoView {
@@ -57,7 +171,7 @@ fn ChromeButton(
                 "flex h-full w-11 items-center justify-center text-white/60 transition-colors duration-150",
                 if danger { "hover:bg-red-500/80 hover:text-white" } else { "hover:bg-white/10 hover:text-white" },
             )
-            on:click=move |_| perform(action)
+            on:click=move |_| on_press.run(())
         >
             {children()}
         </button>

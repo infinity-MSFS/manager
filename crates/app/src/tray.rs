@@ -52,14 +52,21 @@ pub(crate) fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Whether an aircraft depends on the manager now: a sim service with a
+/// live gauge, or a connected bridge. Quitting would cut it off.
+pub(crate) async fn in_use(app: &tauri::AppHandle) -> bool {
+    let services = &app.state::<crate::state::AppState>().providers.sim_services;
+    if services.iter().any(|s| s.in_use()) {
+        return true;
+    }
+    let bridges = app.state::<infinity_bridge::BridgeManager>();
+    bridges.statuses().await.iter().any(|s| s.connected)
+}
+
 fn quit(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let bridges = app.state::<infinity_bridge::BridgeManager>();
-        let services = &app.state::<crate::state::AppState>().providers.sim_services;
-        let in_use = services.iter().any(|s| s.in_use())
-            || bridges.statuses().await.iter().any(|s| s.connected);
-        if !in_use {
+        if !in_use(&app).await {
             app.exit(0);
             return;
         }

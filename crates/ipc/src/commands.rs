@@ -21,6 +21,11 @@ define_commands! {
     app_info => AppInfo(()) -> dto::AppInfo;
     /// Feature switches the UI renders from.
     capabilities => Capabilities(()) -> dto::Capabilities;
+    /// Whether an aircraft is using the manager right now (a connected
+    /// gauge or bridge), so quitting would cut it off.
+    app_in_use => AppInUse(()) -> bool;
+    /// Quits the manager. Closing the window only hides it to the tray.
+    app_exit => AppExit(()) -> ();
 
     /// Current sign-in state.
     auth_session => AuthSession(()) -> dto::SessionState;

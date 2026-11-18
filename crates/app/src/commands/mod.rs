@@ -34,6 +34,8 @@ macro_rules! handlers {
 handlers![
     app::app_info,
     app::capabilities,
+    app::app_in_use,
+    app::app_exit,
     catalog::catalog_fetch,
     catalog::catalog_changelog,
     catalog::catalog_liveries,
