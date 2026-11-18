@@ -18,10 +18,10 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use infinity_ipc::dto::{Channel, Job, JobPhase, Progress};
+use infinity_ipc::dto::{Channel, Job, JobKind, JobPhase, Progress};
 
-use crate::download;
 use crate::staging::Staging;
+use crate::{depot, download};
 
 /// How long an untouched download is kept for a resume.
 pub const KEEP_INTERRUPTED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -75,19 +75,101 @@ pub(crate) fn find(install_dirs: &[PathBuf], now: u64, max_age: Duration) -> Vec
             let Some(item) = inspect(&root, &stem, &state_path, now, max_age) else {
                 continue;
             };
-            // The same product staged in two places: keep the newer.
-            match found
-                .iter_mut()
-                .find(|f| f.job.product_id == item.job.product_id)
-            {
-                Some(existing) if existing.touched_at >= item.touched_at => {}
-                Some(existing) => *existing = item,
-                None => found.push(item),
-            }
+            keep_newer(&mut found, item);
+        }
+        for (stem, dir) in depot_jobs(&root) {
+            let Some(item) = inspect_depot(&root, &stem, &dir, now, max_age) else {
+                continue;
+            };
+            keep_newer(&mut found, item);
         }
     }
     found.sort_by(|a, b| a.job.product_id.cmp(&b.job.product_id));
     found
+}
+
+/// The same product staged in two places: keep the newer.
+fn keep_newer(found: &mut Vec<Interrupted>, item: Interrupted) {
+    match found
+        .iter_mut()
+        .find(|f| f.job.product_id == item.job.product_id)
+    {
+        Some(existing) if existing.touched_at >= item.touched_at => {}
+        Some(existing) => *existing = item,
+        None => found.push(item),
+    }
+}
+
+/// Depot job folders (`<stem>.depot`) in a staging root.
+fn depot_jobs(root: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| {
+            let path = e.ok()?.path();
+            let stem = path
+                .file_name()?
+                .to_str()?
+                .strip_suffix(".depot")?
+                .to_owned();
+            path.is_dir().then_some((stem, path))
+        })
+        .collect()
+}
+
+fn inspect_depot(
+    root: &Path,
+    stem: &str,
+    dir: &Path,
+    now: u64,
+    max_age: Duration,
+) -> Option<Interrupted> {
+    let stale = |touched: u64| now.saturating_sub(touched) > max_age.as_secs();
+    let job = dir.join("job.json");
+    let Some(record) = depot::JobRecord::read(&job) else {
+        if stale(modified(dir)) && !dir.join("commit.json").exists() {
+            crate::staging::remove_dir(dir);
+        }
+        return None;
+    };
+    let staging = Staging::existing(root, &record.product_id);
+    if staging.depot() != dir {
+        tracing::debug!(stem, "depot job names another product; ignored");
+        return None;
+    }
+    // An update the app died in the middle of is finished now, before the
+    // sim can see a half-replaced package.
+    depot::recover(&staging);
+    let journal = dir.join("journal");
+    let touched = record
+        .updated_at
+        .max(modified(&job))
+        .max(modified(&journal));
+    let started = std::fs::metadata(&journal).is_ok_and(|m| m.len() > 36);
+    if stale(touched) || !started {
+        if stale(touched) {
+            tracing::info!(product = %record.product_id, version = %record.version, "discarding an old interrupted download");
+        }
+        depot::discard(&staging);
+        return None;
+    }
+    Some(Interrupted {
+        job: Job {
+            product_id: record.product_id.clone(),
+            name: record.name.clone(),
+            version: record.version.clone(),
+            channel: record.channel,
+            kind: record.kind,
+            phase: JobPhase::Paused,
+            progress: Some(Progress::new(
+                record.downloaded,
+                (record.to_download > 0).then_some(record.to_download),
+            )),
+        },
+        staging,
+        touched_at: touched,
+    })
 }
 
 fn inspect(
@@ -145,8 +227,9 @@ fn inspect(
             name: record.name.clone(),
             version: state.version.clone(),
             channel: record.channel,
+            kind: JobKind::Install,
             phase: JobPhase::Paused,
-            progress: Some(Progress { done: have, total }),
+            progress: Some(Progress::new(have, total)),
         },
         staging,
         touched_at: touched,

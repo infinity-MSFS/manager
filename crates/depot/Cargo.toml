@@ -1,0 +1,29 @@
+[package]
+name = "infinity-depot"
+description = "Content-addressed, chunked package format: the manifest, the chunker, chunk codecs and the builder that turns a package folder into packs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# The folder-to-packs builder used by publishing tools. Clients only read.
+build = ["dep:rayon"]
+
+[dependencies]
+blake3 = "1.8"
+rayon = { version = "1.11", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+zstd = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

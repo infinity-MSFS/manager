@@ -1,6 +1,8 @@
 use infinity_ipc::IpcError;
 use infinity_ipc::commands as cmd;
-use infinity_ipc::dto::{Channel, InstallRequest, InstalledPackage, Job, JobPhase, Progress};
+use infinity_ipc::dto::{
+    Channel, InstallRequest, InstalledPackage, Job, JobKind, JobPhase, Progress,
+};
 use infinity_ui::prelude::*;
 
 use super::ErrorNote;
@@ -34,6 +36,15 @@ pub(crate) fn InstallControls(
         };
         async move {
             error.set(ipc::invoke::<cmd::InstallStart>(&request).await.err());
+        }
+    });
+    let verify = Action::new_local(move |(): &()| {
+        let request = InstallRequest {
+            product_id: id.get_value(),
+            channel,
+        };
+        async move {
+            error.set(ipc::invoke::<cmd::InstallVerify>(&request).await.err());
         }
     });
     let pause = Action::new_local(move |(): &()| async move {
@@ -79,7 +90,9 @@ pub(crate) fn InstallControls(
                     package=package
                     latest=latest
                     busy=start.pending()
+                    verifying=verify.pending()
                     on_update=on(start)
+                    on_verify=on(verify)
                     on_uninstall=Callback::new(move |()| confirm_uninstall.set(true))
                 />
             }
@@ -122,8 +135,13 @@ pub(crate) fn InstallControls(
 
 #[component]
 fn Running(job: Job, on_pause: Callback<()>, on_cancel: Callback<()>) -> impl IntoView {
+    let repairing = job.kind == JobKind::Verify;
     let label = match job.phase {
         JobPhase::Queued => "Waiting",
+        JobPhase::Checking if repairing => "Verifying installed files",
+        JobPhase::Checking => "Checking installed files",
+        JobPhase::Assembling => "Reusing installed files",
+        JobPhase::Downloading if repairing => "Repairing",
         JobPhase::Downloading => "Downloading",
         JobPhase::Verifying => "Verifying download",
         JobPhase::Extracting => "Unpacking and checking files",
@@ -132,8 +150,17 @@ fn Running(job: Job, on_pause: Callback<()>, on_cancel: Callback<()>) -> impl In
     let fraction = job.progress.and_then(Progress::fraction).unwrap_or(0.0);
     let pausable = matches!(
         job.phase,
-        JobPhase::Queued | JobPhase::Downloading | JobPhase::Verifying | JobPhase::Extracting
+        JobPhase::Queued
+            | JobPhase::Checking
+            | JobPhase::Assembling
+            | JobPhase::Downloading
+            | JobPhase::Verifying
+            | JobPhase::Extracting
     );
+    let speed = job
+        .progress
+        .filter(|_| job.phase == JobPhase::Downloading)
+        .and_then(throughput);
     view! {
         <div class="max-w-xl">
             <div class="mb-2 flex items-baseline justify-between font-mono text-[11px]">
@@ -141,6 +168,9 @@ fn Running(job: Job, on_pause: Callback<()>, on_cancel: Callback<()>) -> impl In
                 <span class="text-accent-300">{job.progress.map(amount)}</span>
             </div>
             <Progress value=Signal::derive(move || fraction * 100.0) />
+            {speed.map(|s| view! {
+                <p class="mt-1 text-right font-mono text-[11px] text-white/50">{s}</p>
+            })}
             <div class="mt-3 flex gap-2">
                 <Button variant=Variant::Glass size=Size::Sm icon=icons::PAUSE disabled=!pausable on_click=on_pause>
                     "Pause"
@@ -155,8 +185,9 @@ fn Running(job: Job, on_pause: Callback<()>, on_cancel: Callback<()>) -> impl In
 
 #[component]
 fn Stopped(job: Job, on_resume: Callback<()>, on_discard: Callback<()>) -> impl IntoView {
-    let (status, resume) = match &job.phase {
-        JobPhase::Failed { .. } => ("Install failed", "Try again"),
+    let (status, resume) = match (&job.phase, job.kind) {
+        (JobPhase::Failed { .. }, JobKind::Verify) => ("Repair failed", "Try again"),
+        (JobPhase::Failed { .. }, _) => ("Install failed", "Try again"),
         _ => ("Paused", "Resume"),
     };
     let error = match job.phase {
@@ -184,7 +215,9 @@ fn Installed(
     package: InstalledPackage,
     latest: String,
     busy: Memo<bool>,
+    verifying: Memo<bool>,
     on_update: Callback<()>,
+    on_verify: Callback<()>,
     on_uninstall: Callback<()>,
 ) -> impl IntoView {
     let current = package.version.as_deref() == Some(latest.as_str());
@@ -211,6 +244,9 @@ fn Installed(
                 {status}
             </span>
             {update}
+            <Button variant=Variant::Glass size=Size::Sm icon=icons::SHIELD_CHECK loading=verifying on_click=on_verify>
+                "Verify files"
+            </Button>
             <Button variant=Variant::Ghost tone=Tone::Danger size=Size::Sm icon=icons::TRASH_2 on_click=on_uninstall>
                 "Uninstall"
             </Button>
@@ -222,6 +258,24 @@ fn amount(p: Progress) -> String {
     match p.total {
         Some(total) => format!("{} / {}", human_bytes(p.done), human_bytes(total)),
         None => human_bytes(p.done),
+    }
+}
+
+/// `12.3 MB/s · 4 min left`, once the rate is known.
+fn throughput(p: Progress) -> Option<String> {
+    let rate = p.rate.filter(|r| *r > 0)?;
+    let speed = format!("{}/s", human_bytes(rate));
+    Some(match p.eta_secs() {
+        Some(eta) => format!("{speed} · {} left", human_duration(eta)),
+        None => speed,
+    })
+}
+
+fn human_duration(secs: u64) -> String {
+    match secs {
+        0..60 => "under a minute".to_owned(),
+        60..3600 => format!("{} min", secs.div_ceil(60)),
+        _ => format!("{}h {:02}m", secs / 3600, (secs % 3600) / 60),
     }
 }
 

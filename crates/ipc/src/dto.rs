@@ -196,6 +196,16 @@ impl Sim {
     }
 }
 
+/// A product's preset visibility changed while the sim was running. The
+/// sim builds its aircraft list only at boot, so a restart shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetsChanged {
+    pub product_id: ProductId,
+    pub name: String,
+    pub sim: Sim,
+}
+
 /// How a sim was installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -309,12 +319,32 @@ pub struct Job {
     pub name: String,
     pub version: String,
     pub channel: Channel,
+    /// What the job is for. Older builds sent none: an install.
+    #[serde(default, skip_serializing_if = "JobKind::is_install")]
+    pub kind: JobKind,
     pub phase: JobPhase,
-    /// Bytes downloaded while downloading or verifying; bytes written while
-    /// extracting a zip, or compressed bytes read while extracting a
-    /// `.tar.zst` (a stream does not declare its unpacked size). A job
-    /// restored as paused after a restart carries the bytes on disk.
+    /// Bytes of the current phase: downloaded while downloading, hashed
+    /// while checking or verifying, written while assembling or extracting
+    /// a zip, compressed bytes read while extracting a `.tar.zst` (a stream
+    /// does not declare its unpacked size). A job restored as paused after
+    /// a restart carries the bytes already downloaded.
     pub progress: Option<Progress>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    /// Installs or updates to the catalog's version.
+    #[default]
+    Install,
+    /// Checks every installed file and repairs what is damaged or missing.
+    Verify,
+}
+
+impl JobKind {
+    pub fn is_install(&self) -> bool {
+        *self == Self::Install
+    }
 }
 
 impl Job {
@@ -337,6 +367,10 @@ impl Job {
 pub enum JobPhase {
     /// Waiting for another install to finish.
     Queued,
+    /// Comparing the files already on disk with the package.
+    Checking,
+    /// Building changed files from data already on disk.
+    Assembling,
     Downloading,
     Verifying,
     Extracting,
@@ -356,6 +390,9 @@ pub enum JobPhase {
 pub struct Progress {
     pub done: u64,
     pub total: Option<u64>,
+    /// Recent throughput in bytes per second, once measurable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<u64>,
 }
 
 impl Progress {
@@ -364,6 +401,21 @@ impl Progress {
     pub fn fraction(self) -> Option<f64> {
         let total = self.total.filter(|t| *t > 0)?;
         Some((self.done as f64 / total as f64).clamp(0.0, 1.0))
+    }
+
+    pub const fn new(done: u64, total: Option<u64>) -> Self {
+        Self {
+            done,
+            total,
+            rate: None,
+        }
+    }
+
+    /// Seconds left at the current rate, when both are known.
+    pub fn eta_secs(self) -> Option<u64> {
+        let total = self.total?;
+        let rate = self.rate.filter(|r| *r > 0)?;
+        Some(total.saturating_sub(self.done).div_ceil(rate))
     }
 }
 
@@ -625,10 +677,27 @@ mod tests {
 
     #[test]
     fn progress_fraction() {
-        let p = |done, total| Progress { done, total };
+        let p = Progress::new;
         assert_eq!(p(5, Some(10)).fraction(), Some(0.5));
         assert_eq!(p(5, None).fraction(), None);
         assert_eq!(p(5, Some(0)).fraction(), None);
         assert_eq!(p(11, Some(10)).fraction(), Some(1.0));
+        let rated = Progress {
+            rate: Some(4),
+            ..p(2, Some(10))
+        };
+        assert_eq!(rated.eta_secs(), Some(2));
+        assert_eq!(p(2, Some(10)).eta_secs(), None);
+    }
+
+    #[test]
+    fn job_kind_defaults_to_install() {
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "productId": "p", "name": "P", "version": "1", "channel": "stable",
+            "phase": { "state": "queued" }, "progress": null
+        }))
+        .unwrap();
+        assert_eq!(job.kind, JobKind::Install);
+        assert!(serde_json::to_value(&job).unwrap().get("kind").is_none());
     }
 }

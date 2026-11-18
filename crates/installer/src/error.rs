@@ -42,6 +42,22 @@ pub(crate) enum Error {
     #[error("{0}")]
     Unsupported(String),
 
+    /// Data that keeps arriving damaged, or a disk that keeps damaging it.
+    #[error("the download is damaged at the source: {0}")]
+    Corrupt(String),
+
+    /// Verifying something that is not installed.
+    #[error("{0} is not installed")]
+    NotInstalled(String),
+
+    /// A depot manifest or chunk problem.
+    #[error(transparent)]
+    Depot(#[from] infinity_depot::Error),
+
+    /// A failure reported by the content provider, passed through.
+    #[error("{}", .0.message)]
+    Remote(IpcError),
+
     #[error(
         "not enough space on {} to {what}: needs {}, {} free",
         space::volume_label(path),
@@ -133,6 +149,20 @@ impl From<Error> for IpcError {
                 Self::new(IpcErrorCode::ManifestInvalid, message)
             }
             Error::Unsupported(_) => Self::unsupported(message),
+            Error::Corrupt(_) => Self::new(IpcErrorCode::CdnSignatureInvalid, message),
+            Error::NotInstalled(_) => Self::new(IpcErrorCode::PackageDirNotFound, message),
+            Error::Remote(e) => e,
+            Error::Depot(e) => match e {
+                infinity_depot::Error::Unsupported(_) => Self::unsupported(message),
+                infinity_depot::Error::Chunk { .. } => {
+                    Self::new(IpcErrorCode::CdnSignatureInvalid, message)
+                }
+                infinity_depot::Error::Io { path, source } => {
+                    Self::from(Error::Io { path, source })
+                }
+                infinity_depot::Error::Cancelled => Self::new(IpcErrorCode::JobCancelled, message),
+                _ => Self::new(IpcErrorCode::ManifestInvalid, message),
+            },
             Error::DiskFull {
                 path,
                 needed,

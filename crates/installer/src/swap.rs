@@ -60,7 +60,7 @@ pub(crate) fn remove(package: &Path, staging: &Staging) -> Result<()> {
     Ok(())
 }
 
-fn rename(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename(from: &Path, to: &Path) -> Result<()> {
     let mut attempt = 1;
     loop {
         match std::fs::rename(from, to) {

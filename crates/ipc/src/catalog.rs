@@ -39,6 +39,36 @@ pub struct Product {
     pub coming_soon: bool,
     #[serde(default)]
     pub navdata: Option<NavdataSpec>,
+    /// Which of the package's sim presets each account may fly. Absent:
+    /// the manager leaves the presets alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets: Option<PresetGating>,
+}
+
+/// Preset visibility: the manager writes `isUserSelectable` into each
+/// preset's `aircraft.cfg` so the sim lists only the presets the account
+/// covers. A convenience for the aircraft list, not a lock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetGating {
+    /// The folder holding one folder per preset, relative to the package
+    /// root, `/`-separated.
+    pub root: String,
+    pub groups: Vec<PresetGroup>,
+    /// Permissions that see every listed preset.
+    #[serde(default)]
+    pub see_all: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetGroup {
+    /// The permission that unlocks the group; `None` is free for everyone,
+    /// signed out included.
+    #[serde(default)]
+    pub requires: Option<String>,
+    /// Preset folder names under [`PresetGating::root`].
+    pub presets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +98,10 @@ pub enum PackageSpec {
         archive: ArchiveRef,
         #[serde(default)]
         manifest_key: Option<String>,
+        /// The chunked release, when published. Preferred over `archive`
+        /// by builds that understand it; `archive` stays for older ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depot: Option<DepotRef>,
     },
     #[serde(rename_all = "camelCase")]
     Msfs2020 {
@@ -75,10 +109,37 @@ pub enum PackageSpec {
         archive: ArchiveRef,
         #[serde(default)]
         manifest_key: Option<String>,
+        /// The chunked release, when published. Preferred over `archive`
+        /// by builds that understand it; `archive` stays for older ones.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depot: Option<DepotRef>,
     },
     Generic {
         archive: ArchiveRef,
     },
+}
+
+/// A release published as content-addressed chunks (see `infinity-depot`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepotRef {
+    /// Storage key of the zstd-compressed manifest.
+    pub manifest_key: String,
+    /// BLAKE3 of the manifest bytes, lowercase hex.
+    pub manifest_hash: String,
+    /// Manifest format version; a build that cannot read it falls back to
+    /// the archive.
+    #[serde(default = "DepotRef::first_schema")]
+    pub schema: u32,
+    /// Bytes on disk once installed.
+    #[serde(default)]
+    pub install_size: u64,
+}
+
+impl DepotRef {
+    const fn first_schema() -> u32 {
+        1
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -287,6 +348,14 @@ impl PackageSpec {
         }
     }
 
+    /// The chunked release, when the catalog has one.
+    pub fn depot(&self) -> Option<&DepotRef> {
+        match self {
+            Self::Msfs2024 { depot, .. } | Self::Msfs2020 { depot, .. } => depot.as_ref(),
+            Self::Generic { .. } => None,
+        }
+    }
+
     /// Key of the package's integrity manifest, when it ships one.
     pub fn manifest_key(&self) -> Option<&str> {
         match self {
@@ -345,6 +414,24 @@ pub struct ChangelogEntry {
 pub enum PresignArtifact {
     Archive,
     Manifest,
+    /// The chunked release's manifest (`package.depot.manifestKey`).
+    DepotManifest,
+}
+
+/// Worker `POST /v1/depot/presign` request: download URLs for packs of a
+/// product's depot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepotPresignRequest {
+    pub product_id: ProductId,
+    pub keys: Vec<String>,
+}
+
+/// Worker `POST /v1/depot/presign` response, in request order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepotPresigned {
+    pub urls: Vec<PresignedUrl>,
 }
 
 /// Worker `POST /v1/presign` response
@@ -413,6 +500,55 @@ pub struct EntitlementsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn depot_is_optional_beside_the_archive() {
+        let spec: PackageSpec = serde_json::from_value(serde_json::json!({
+            "kind": "msfs2024",
+            "packageDirName": "p",
+            "archive": { "format": "zip", "key": "a.zip" },
+            "depot": { "manifestKey": "depots/p/m", "manifestHash": "00", "installSize": 5 }
+        }))
+        .unwrap();
+        let depot = spec.depot().unwrap();
+        assert_eq!(depot.schema, 1);
+        assert_eq!(depot.install_size, 5);
+        let legacy: PackageSpec = serde_json::from_value(serde_json::json!({
+            "kind": "msfs2020",
+            "packageDirName": "p",
+            "archive": { "format": "zip", "key": "a.zip" }
+        }))
+        .unwrap();
+        assert!(legacy.depot().is_none());
+        assert_eq!(
+            serde_json::to_value(PresignArtifact::DepotManifest).unwrap(),
+            "depot_manifest"
+        );
+    }
+
+    #[test]
+    fn presets_are_optional() {
+        let product = |extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "id": "p", "name": "P", "category": "aircraft", "vendor": "v",
+                "version": "1.0.0", "ownership": { "kind": "free" },
+                "package": { "kind": "generic", "archive": { "format": "zip", "key": "a.zip" } }
+            });
+            if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+                o.extend(e.clone());
+            }
+            serde_json::from_value::<Product>(v).unwrap()
+        };
+        assert!(product(serde_json::json!({})).presets.is_none());
+        let gated = product(serde_json::json!({ "presets": {
+            "root": "SimObjects/x",
+            "groups": [{ "presets": ["A"] }, { "requires": "perm", "presets": ["B"] }]
+        }}));
+        let presets = gated.presets.unwrap();
+        assert_eq!(presets.groups[0].requires, None);
+        assert_eq!(presets.groups[1].requires.as_deref(), Some("perm"));
+        assert!(presets.see_all.is_empty());
+    }
 
     #[test]
     fn archive_formats_match_the_worker() {

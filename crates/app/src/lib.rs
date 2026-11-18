@@ -7,6 +7,7 @@ mod efb_docs;
 mod efb_presence;
 mod events;
 mod paths;
+mod presets;
 mod simbrief_gauge;
 mod state;
 mod telemetry;
@@ -28,6 +29,7 @@ use tauri::Manager;
 use crate::state::AppState;
 
 pub use infinity_providers;
+pub use presets::session_changed;
 pub use tauri;
 
 pub fn init_logging() {
@@ -114,6 +116,7 @@ impl Builder {
             .setup(|app| {
                 let app_data = app.path().app_data_dir()?;
                 app.manage(PreferencesStore::new(&app_data));
+                app.manage(presets::PresetGate::default());
                 let registry = Arc::new(InstalledStore::new(&app_data));
                 let installer = Installer::new(registry.clone())
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
@@ -159,6 +162,7 @@ impl Builder {
                 window_geometry::repair(app.handle());
                 tray::install(app.handle())?;
                 start_sim_services(app.handle());
+                presets::on_startup(app.handle());
                 Ok(())
             })
             .build(context)?
@@ -196,7 +200,8 @@ fn watch_sim(app: &tauri::AppHandle) -> SimWatch {
 }
 
 /// Relays job changes to the UI, and the new installed set once a job
-/// completes.
+/// completes. A completed job re-applies the product's preset visibility:
+/// the swapped-in package ships cfgs that show every preset.
 fn forward_jobs(app: &tauri::AppHandle, installer: &Installer, registry: Arc<InstalledStore>) {
     let mut changes = installer.subscribe();
     let app = app.clone();
@@ -212,6 +217,7 @@ fn forward_jobs(app: &tauri::AppHandle, installer: &Installer, registry: Arc<Ins
             };
             events::emit::<JobChanged>(&app, &job);
             if job.phase == JobPhase::Completed {
+                presets::after_job(&app, job.product_id.clone(), job.channel);
                 match registry.list().await {
                     Ok(installed) => events::emit::<InstalledChanged>(&app, &installed),
                     Err(e) => tracing::warn!(error = %e, "could not read installed products"),

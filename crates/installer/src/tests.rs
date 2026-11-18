@@ -7,6 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
+use url::Url;
+
 use super::*;
 use crate::extract::tests::zip_of;
 use crate::tarzst::tests::{file, tar_zst_of};
@@ -176,13 +178,29 @@ impl Fixture {
             name: "Test".into(),
             version: "1.0.0".into(),
             channel: Channel::Stable,
-            archive_url: server.url("pkg.zip"),
-            archive_key: "packages/aerodynamics-test/1.0.0/pkg.zip".into(),
-            format: ArchiveFormat::Zip,
-            manifest_url: manifest.then(|| server.url("manifest.json")),
             package_dir_name: "aerodynamics-test".into(),
             install_dir: self.community.clone(),
+            source: Source::Archive(ArchiveSource {
+                url: server.url("pkg.zip"),
+                key: "packages/aerodynamics-test/1.0.0/pkg.zip".into(),
+                format: ArchiveFormat::Zip,
+                manifest_url: manifest.then(|| server.url("manifest.json")),
+            }),
         }
+    }
+
+    /// [`Fixture::plan`] with its archive source changed by `f`.
+    fn plan_with(
+        &self,
+        server: &Server,
+        manifest: bool,
+        f: impl FnOnce(&mut ArchiveSource),
+    ) -> Plan {
+        let mut plan = self.plan(server, manifest);
+        if let Source::Archive(a) = &mut plan.source {
+            f(a);
+        }
+        plan
     }
 
     fn package(&self) -> PathBuf {
@@ -483,11 +501,10 @@ async fn installs_a_tar_zst_package() {
         Fault::None,
     )
     .await;
-    let plan = Plan {
-        archive_url: server.url("pkg.tar.zst"),
-        format: ArchiveFormat::TarZst,
-        ..fx.plan(&server, true)
-    };
+    let plan = fx.plan_with(&server, true, |a| {
+        a.url = server.url("pkg.tar.zst");
+        a.format = ArchiveFormat::TarZst;
+    });
     let mut rx = fx.installer.subscribe();
     fx.installer.start(plan).unwrap();
     let job = until(&mut rx, terminal).await;
@@ -524,11 +541,10 @@ async fn a_tar_zst_that_differs_from_its_manifest_is_refused() {
         Fault::None,
     )
     .await;
-    let plan = Plan {
-        archive_url: server.url("pkg.tar.zst"),
-        format: ArchiveFormat::TarZst,
-        ..fx.plan(&server, true)
-    };
+    let plan = fx.plan_with(&server, true, |a| {
+        a.url = server.url("pkg.tar.zst");
+        a.format = ArchiveFormat::TarZst;
+    });
     let mut rx = fx.installer.subscribe();
     fx.installer.start(plan).unwrap();
     let JobPhase::Failed { error } = until(&mut rx, terminal).await.phase else {
@@ -548,10 +564,7 @@ async fn a_mislabelled_archive_fails_without_downloading_again() {
     let fx = Fixture::new();
     let (zip, _) = package(fx.tmp.path(), &noise(10_000));
     let server = Server::start(HashMap::from([("pkg.zip", zip)]), Fault::None).await;
-    let plan = Plan {
-        format: ArchiveFormat::TarZst,
-        ..fx.plan(&server, false)
-    };
+    let plan = fx.plan_with(&server, false, |a| a.format = ArchiveFormat::TarZst);
     let mut rx = fx.installer.subscribe();
     fx.installer.start(plan).unwrap();
     let JobPhase::Failed { error } = until(&mut rx, terminal).await.phase else {
@@ -571,12 +584,14 @@ fn unknown_formats_are_refused_up_front() {
         name: "Test".into(),
         version: "1.0.0".into(),
         channel: Channel::Stable,
-        archive_url: Url::parse("http://127.0.0.1:9/pkg").unwrap(),
-        archive_key: "k".into(),
-        format: ArchiveFormat::Unknown,
-        manifest_url: None,
         package_dir_name: "aerodynamics-test".into(),
         install_dir: fx.community.clone(),
+        source: Source::Archive(ArchiveSource {
+            url: Url::parse("http://127.0.0.1:9/pkg").unwrap(),
+            key: "k".into(),
+            format: ArchiveFormat::Unknown,
+            manifest_url: None,
+        }),
     };
     let err = fx.installer.start(plan).unwrap_err();
     assert_eq!(err.code, IpcErrorCode::Unsupported);
@@ -638,10 +653,9 @@ async fn a_changed_archive_key_starts_the_download_over() {
     until(&mut rx, terminal).await;
     server.release.notify_waiters();
 
-    let plan = Plan {
-        archive_key: "packages/aerodynamics-test/1.0.0/rebuilt.zip".into(),
-        ..fx.plan(&server, false)
-    };
+    let plan = fx.plan_with(&server, false, |a| {
+        a.key = "packages/aerodynamics-test/1.0.0/rebuilt.zip".into();
+    });
     fx.installer.start(plan).unwrap();
     assert_eq!(until(&mut rx, terminal).await.phase, JobPhase::Completed);
     let last = server.requests().pop().unwrap().to_lowercase();
@@ -693,13 +707,7 @@ fn discovery_lists_recent_downloads_and_removes_stale_ones() {
     assert_eq!(job.product_id, "aerodynamics-kept");
     assert_eq!(job.name, "Left behind");
     assert_eq!(job.phase, JobPhase::Paused);
-    assert_eq!(
-        job.progress,
-        Some(Progress {
-            done: 1000,
-            total: Some(5000)
-        })
-    );
+    assert_eq!(job.progress, Some(Progress::new(1000, Some(5000))));
     // Recent leftovers it cannot list are left alone.
     assert!(legacy.download().is_file());
     assert!(junk.is_file());

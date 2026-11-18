@@ -67,6 +67,7 @@ pub fn configurator_panel(product: &Product) -> AnyView {
 fn phase_label(phase: &JobPhase) -> &'static str {
     match phase {
         JobPhase::Queued => "Starting",
+        JobPhase::Checking | JobPhase::Assembling => "Checking",
         JobPhase::Downloading => "Downloading",
         JobPhase::Verifying => "Verifying",
         JobPhase::Extracting | JobPhase::Installing => "Loading",

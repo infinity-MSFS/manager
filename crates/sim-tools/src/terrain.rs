@@ -133,6 +133,7 @@ fn job(phase: JobPhase, progress: Option<Progress>) -> Job {
         name: JOB_NAME.into(),
         version: String::new(),
         channel: Default::default(),
+        kind: Default::default(),
         phase,
         progress,
     }
@@ -175,7 +176,7 @@ async fn run_download(app: &AppHandle, source: &Source) -> IpcResult<()> {
     let staged = download::fetch(&state.http, source, &dest, &mut |step| {
         let (phase, progress) = match step {
             Step::Downloading { done, total } => {
-                (JobPhase::Downloading, Some(Progress { done, total }))
+                (JobPhase::Downloading, Some(Progress::new(done, total)))
             }
             Step::Verifying => (JobPhase::Verifying, None),
         };

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 /// Written into each package the manager installs, recording the product
 /// version. Same name and fields as v3, which reads it too.
-pub(crate) const MARKER_FILE: &str = "infinity.json";
+pub const MARKER_FILE: &str = "infinity.json";
 
 /// A product the rescan should look for.
 #[derive(Debug, Clone)]

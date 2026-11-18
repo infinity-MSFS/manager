@@ -14,6 +14,7 @@ infinity-ipc = { workspace = true }
 infinity-providers = { workspace = true }
 infinity-persistence = { workspace = true }
 infinity-installer = { workspace = true }
+infinity-depot = { workspace = true }
 infinity-configurator = { workspace = true }
 infinity-bridge = { workspace = true }
 infinity-nav-db = { workspace = true }

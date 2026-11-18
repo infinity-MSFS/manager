@@ -8,6 +8,7 @@
 
 use std::collections::HashSet;
 
+use infinity_ipc::events::SimRestartNeeded;
 use infinity_ui::prelude::*;
 use leptos_router::hooks::use_navigate;
 
@@ -141,6 +142,20 @@ pub(crate) fn provide() -> Notices {
     let notices = Notices::new();
     provide_context(notices);
     notices
+}
+
+/// Notices the backend raises.
+pub(crate) fn listen(notices: Notices) {
+    // The sim lists aircraft only at boot; a change made while it runs
+    // shows after a restart.
+    ipc::listen::<SimRestartNeeded>(move |change| {
+        notices.show(
+            Notice::new(Tone::Info, format!("Restart {} to update the {}", change.sim.label(), change.name))
+                .key(format!("presets-restart:{}", change.product_id))
+                .body("The versions you can fly changed. The aircraft list updates the next time the sim starts.")
+                .duration_ms(None),
+        );
+    });
 }
 
 /// The app's notices. Outside the app (a stray root) this is a detached

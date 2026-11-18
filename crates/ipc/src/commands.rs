@@ -62,6 +62,10 @@ define_commands! {
     /// paused download resumes. Progress arrives as
     /// [`crate::events::JobChanged`].
     install_start => InstallStart(dto::InstallRequest) -> dto::Job;
+    /// Checks an installed product file by file against its package and
+    /// repairs whatever is damaged or missing, downloading only that. A
+    /// package without a per-file manifest is reinstalled if it fails.
+    install_verify => InstallVerify(dto::InstallRequest) -> dto::Job;
     /// Stops a job, keeping the partial download.
     install_pause => InstallPause(catalog::ProductId) -> ();
     /// Stops a job and discards its partial download.

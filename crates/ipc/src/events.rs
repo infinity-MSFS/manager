@@ -16,6 +16,8 @@ define_events! {
     "bridge:event" => BridgeEventReceived(dto::BridgeMessage);
     /// A bridge gained or lost its gauges.
     "bridge:connection" => BridgeConnectionChanged(dto::ConnectionChange);
+    /// Preset visibility changed under a running sim: restart it to see.
+    "presets:restart-sim" => SimRestartNeeded(dto::PresetsChanged);
     /// The EFB server started, stopped, or a tablet came or went.
     "efb:changed" => EfbChanged(dto::EfbStatus);
 }

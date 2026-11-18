@@ -1,9 +1,7 @@
 use infinity_ipc::dto::SessionState;
-use infinity_ipc::events::SessionChanged;
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 
-use crate::events::emit;
 use crate::state::AppState;
 
 pub(crate) fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
@@ -37,7 +35,7 @@ fn dispatch(app: &tauri::AppHandle, url: url::Url) {
                 SessionState::SignedOut
             }
         };
-        emit::<SessionChanged>(&app, &state);
+        crate::presets::session_changed(&app, &state);
     });
 }
 

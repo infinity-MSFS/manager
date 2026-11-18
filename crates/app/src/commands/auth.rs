@@ -1,11 +1,10 @@
 use infinity_ipc::commands as cmd;
 use infinity_ipc::dto::{LoginStarted, SessionState};
-use infinity_ipc::events::SessionChanged;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
 use super::Out;
-use crate::events::emit;
+use crate::presets::session_changed;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -22,7 +21,7 @@ pub(crate) async fn auth_begin_login(
     if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
         tracing::warn!(error = %e, "could not open the system browser");
     }
-    emit::<SessionChanged>(&app, &SessionState::Pending);
+    session_changed(&app, &SessionState::Pending);
     Ok(LoginStarted {
         authorize_url: url.into(),
     })
@@ -34,6 +33,6 @@ pub(crate) async fn auth_logout(
     state: State<'_, AppState>,
 ) -> Out<cmd::AuthLogout> {
     state.providers.identity.logout().await?;
-    emit::<SessionChanged>(&app, &SessionState::SignedOut);
+    session_changed(&app, &SessionState::SignedOut);
     Ok(())
 }

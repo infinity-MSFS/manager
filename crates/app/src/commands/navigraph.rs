@@ -134,6 +134,7 @@ pub(crate) async fn navdata_update(
         name: plan.name.clone(),
         version: plan.cycle.cycle.clone(),
         channel: args.channel,
+        kind: Default::default(),
         phase: JobPhase::Queued,
         progress: None,
     };
@@ -148,7 +149,7 @@ pub(crate) async fn navdata_update(
             infinity_navigraph::install_navdata(&http, &plan, &mut |p| {
                 let (phase, progress) = match p {
                     NavdataProgress::Downloading { done, total } => {
-                        (JobPhase::Downloading, Some(Progress { done, total }))
+                        (JobPhase::Downloading, Some(Progress::new(done, total)))
                     }
                     NavdataProgress::Verifying => (JobPhase::Verifying, None),
                     NavdataProgress::Extracting => (JobPhase::Extracting, None),

@@ -100,6 +100,11 @@ impl Staging {
         self.path("unpack")
     }
 
+    /// A depot job's working folder (see [`crate::depot`]).
+    pub(crate) fn depot(&self) -> PathBuf {
+        self.path("depot")
+    }
+
     /// The package being replaced, held until the swap has succeeded.
     pub(crate) fn previous(&self) -> PathBuf {
         self.path("previous")
@@ -131,6 +136,7 @@ impl Staging {
     /// leaves it empty.
     pub(crate) fn discard(&self) {
         self.clear_work();
+        crate::depot::discard(self);
         self.discard_download();
     }
 

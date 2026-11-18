@@ -243,9 +243,44 @@ impl ContentProvider for HttpContent {
             expires_at: None,
         })
     }
+
+    async fn resolve_depot_packs(
+        &self,
+        product: &Product,
+        keys: &[String],
+    ) -> IpcResult<Vec<DownloadUrl>> {
+        if !matches!(product.ownership, OwnershipPolicy::Free) {
+            return Err(IpcError::new(
+                IpcErrorCode::NotOwned,
+                format!("{} requires the official build", product.name),
+            ));
+        }
+        let base = self
+            .artifact_base
+            .as_ref()
+            .ok_or_else(|| IpcError::unsupported("this build has no download source configured"))?;
+        let prefix = format!("depots/{}/packs/", product.id);
+        keys.iter()
+            .map(|key| {
+                if !key.starts_with(&prefix) {
+                    return Err(IpcError::new(
+                        IpcErrorCode::ManifestInvalid,
+                        format!("{key} is not a pack of {}", product.id),
+                    ));
+                }
+                Ok(DownloadUrl {
+                    url: join(base, key)?,
+                    expires_at: None,
+                })
+            })
+            .collect()
+    }
 }
 
 fn artifact_key(package: &PackageSpec, artifact: PresignArtifact) -> Option<&str> {
+    if artifact == PresignArtifact::DepotManifest {
+        return package.depot().map(|d| d.manifest_key.as_str());
+    }
     let (archive, manifest) = match package {
         PackageSpec::Msfs2024 {
             archive,
@@ -262,6 +297,7 @@ fn artifact_key(package: &PackageSpec, artifact: PresignArtifact) -> Option<&str
     match artifact {
         PresignArtifact::Archive => Some(archive.key.as_str()),
         PresignArtifact::Manifest => manifest,
+        PresignArtifact::DepotManifest => None,
     }
 }
 

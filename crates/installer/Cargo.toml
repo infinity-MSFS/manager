@@ -12,6 +12,8 @@ publish.workspace = true
 [dependencies]
 infinity-ipc = { workspace = true }
 infinity-persistence = { workspace = true }
+infinity-depot = { workspace = true }
+async-trait = { workspace = true }
 fs4 = "0.13"
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -26,6 +28,7 @@ tar = { version = "0.4", default-features = false }
 zstd = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+infinity-depot = { workspace = true, features = ["build"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["net", "io-util"] }
 

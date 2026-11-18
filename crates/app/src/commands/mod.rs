@@ -54,6 +54,7 @@ handlers![
     install::installed_size,
     install::installed_uninstall,
     install::install_start,
+    install::install_verify,
     install::install_pause,
     install::install_cancel,
     install::jobs_list,

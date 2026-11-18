@@ -18,6 +18,7 @@ pub(crate) fn App(extensions: Extensions) -> impl IntoView {
     theme::provide(use_app().prefs);
     ext::provide(extensions);
     let notices = notices::provide();
+    notices::listen(notices);
 
     view! {
         <Router>

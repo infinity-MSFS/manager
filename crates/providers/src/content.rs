@@ -20,6 +20,21 @@ pub trait ContentProvider: Send + Sync + std::fmt::Debug {
         artifact: PresignArtifact,
     ) -> IpcResult<DownloadUrl>;
 
+    /// Download URLs for packs of a product's depot (see
+    /// `PackageSpec::depot`), in the order of `keys`. Every key is under
+    /// the product's `depots/<id>/packs/` prefix. Called in batches, and
+    /// again for keys whose URL expired.
+    async fn resolve_depot_packs(
+        &self,
+        product: &Product,
+        _keys: &[String],
+    ) -> IpcResult<Vec<DownloadUrl>> {
+        Err(IpcError::unsupported(format!(
+            "this build cannot download {} in chunks",
+            product.name
+        )))
+    }
+
     /// Release notes, newest first.
     async fn changelog(&self, _product_id: &str) -> IpcResult<Vec<ChangelogEntry>> {
         Ok(Vec::new())

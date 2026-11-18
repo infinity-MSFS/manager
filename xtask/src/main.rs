@@ -28,7 +28,9 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    eprintln!("usage: cargo xtask <dev | dist | check | frontend <prep|serve|build> [--dir PATH]>");
+    eprintln!(
+        "usage: cargo xtask <dev | dist [--app DIR] [tauri args] | check | frontend <prep|serve|build> [--dir PATH]>"
+    );
 }
 
 fn root() -> PathBuf {
@@ -67,11 +69,26 @@ fn dev(extra: &[&str]) -> Result {
     run(&mut cmd)
 }
 
+/// `--app DIR` bundles another desktop crate built on this workspace (the
+/// official app); the launch service and FLIR DLLs are staged the same way.
 fn dist(extra: &[&str]) -> Result {
+    let (app, extra) = match extra {
+        ["--app", dir, rest @ ..] => {
+            let dir = PathBuf::from(dir);
+            let dir = if dir.is_absolute() {
+                dir
+            } else {
+                root().join(dir)
+            };
+            (dir, rest)
+        }
+        rest => (desktop_dir(), rest),
+    };
+    if !app.join("tauri.conf.json").is_file() {
+        return Err(format!("{} has no tauri.conf.json", app.display()));
+    }
     let mut cmd = cargo();
-    cmd.current_dir(desktop_dir())
-        .args(["tauri", "build"])
-        .args(extra);
+    cmd.current_dir(&app).args(["tauri", "build"]).args(extra);
     embed_launch_svc(&mut cmd, true)?;
     stage_viewports()?;
     run(&mut cmd)

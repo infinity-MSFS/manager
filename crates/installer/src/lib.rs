@@ -1,60 +1,69 @@
-//! Installs product packages into the sim's install folder.
+//! Installs product packages into the sim's install folder, and verifies
+//! and repairs them.
 //!
-//! An install runs as a job: download (resumable), verify the archive,
-//! extract into staging while hashing every file, check the result against
-//! the package manifest, then swap it into place in one rename. Nothing in
-//! the install folder changes until the very last step, and a package that
-//! does not match its manifest never gets there.
+//! Two release formats are supported:
+//!
+//! - **Depots** ([`depot`]): content-addressed chunks in shared packs, as
+//!   described in `infinity-depot`. Updates download only changed chunks,
+//!   downloads resume per chunk, every file is verified chunk by chunk
+//!   before it is installed, and a damaged install is repaired by fetching
+//!   only the damaged chunks.
+//! - **Archives** ([`archive`]): one zip or `.tar.zst` per release, the
+//!   legacy format. Resumable, verified against its manifest, swapped in
+//!   whole; an update or repair downloads everything again.
+//!
+//! Either way an install runs as a job, and the install folder does not
+//! change until the very last step, which can never leave a mix of two
+//! versions behind.
 //!
 //! Jobs are keyed by product: one per product at a time. A paused or
 //! failed job is replaced by the next install of that product, which picks
 //! up its partial download. Downloads outlive the app: on the next start
 //! [`Installer::find_interrupted`] and [`Installer::restore`] list them as
 //! paused jobs again.
-//!
-//! Packages are zip or `.tar.zst`, as the catalog declares; the file must
-//! agree with the declaration.
 
+mod archive;
+pub mod depot;
 mod download;
 mod error;
 mod extract;
 mod inspect;
 mod job;
 pub mod manifest;
+pub mod presets;
 mod resume;
 mod space;
 mod staging;
 mod swap;
 mod tarzst;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use infinity_ipc::catalog::{ArchiveFormat, ProductId};
-use infinity_ipc::dto::{Channel, InstalledPackage, Job, JobPhase, Progress};
+use infinity_ipc::dto::{Channel, InstalledPackage, Job, JobKind, JobPhase, Progress};
 use infinity_ipc::{IpcError, IpcErrorCode, IpcResult};
 use infinity_persistence::InstalledStore;
-use tokio::sync::{Semaphore, broadcast, watch};
-use url::Url;
+use tokio::sync::{Semaphore, SemaphorePermit, broadcast, watch};
 
-pub use inspect::{Wanted, dir_size, package_version, rescan};
+pub use archive::ArchiveSource;
+pub use depot::{DepotSource, PackUrls};
+pub use inspect::{MARKER_FILE, Wanted, dir_size, package_version, rescan};
 pub use manifest::Manifest;
 pub use resume::{Interrupted, KEEP_INTERRUPTED_FOR};
 
-use crate::error::{Error, IoContext, Result, Stop};
+use crate::error::{Error, Result, Stop};
 use crate::job::StopRx;
 use crate::staging::Staging;
 
 const PARALLEL_DOWNLOADS: usize = 2;
-/// Extraction is disk-bound; two at once only slows both down.
+/// Extraction and commits are disk-bound; two at once only slows both down.
 const PARALLEL_INSTALLS: usize = 1;
-/// A package that fails its manifest is downloaded once more from scratch
-/// before the job gives up.
-const ATTEMPTS: u32 = 2;
 const PROGRESS_EVERY: Duration = Duration::from_millis(150);
-const MAX_LISTED_PROBLEMS: usize = 5;
+/// Throughput is averaged over this long.
+const RATE_WINDOW: Duration = Duration::from_secs(5);
 
 /// Everything needed to install one product version.
 #[derive(Debug, Clone)]
@@ -63,18 +72,17 @@ pub struct Plan {
     pub name: String,
     pub version: String,
     pub channel: Channel,
-    pub archive_url: Url,
-    /// The catalog's storage key for the archive. Identifies the file
-    /// across restarts, when `archive_url` (presigned) has expired.
-    pub archive_key: String,
-    /// What the catalog says the archive is. Checked against the file.
-    pub format: ArchiveFormat,
-    /// The package manifest. Without one, only the zip's own checksums
-    /// guard the install.
-    pub manifest_url: Option<Url>,
     pub package_dir_name: String,
     /// The Community folder.
     pub install_dir: PathBuf,
+    pub source: Source,
+}
+
+/// Where the release comes from.
+#[derive(Debug, Clone)]
+pub enum Source {
+    Archive(ArchiveSource),
+    Depot(DepotSource),
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +115,7 @@ impl Installer {
             .user_agent(concat!("infinity-manager/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
+            .pool_max_idle_per_host(depot::fetch_connections())
             .build()
             .map_err(|e| IpcError::internal(format!("http client: {e}")))?;
         Ok(Self {
@@ -141,9 +150,21 @@ impl Installer {
             .is_some_and(|s| s.job.is_active())
     }
 
-    /// Starts installing. Returns the running job instead when one for the
-    /// product is already active, so a double click is harmless.
+    /// Starts installing or updating. Returns the running job instead when
+    /// one for the product is already active, so a double click is
+    /// harmless.
     pub fn start(&self, plan: Plan) -> IpcResult<Job> {
+        self.begin(plan, JobKind::Install)
+    }
+
+    /// Checks every installed file of the product against `plan`'s release
+    /// and repairs what is damaged or missing. Returns the running job
+    /// instead when one for the product is already active.
+    pub fn verify(&self, plan: Plan) -> IpcResult<Job> {
+        self.begin(plan, JobKind::Verify)
+    }
+
+    fn begin(&self, plan: Plan, kind: JobKind) -> IpcResult<Job> {
         validate(&plan)?;
         let mut slots = self.inner.slots();
         if let Some(slot) = slots.get(&plan.product_id)
@@ -161,6 +182,7 @@ impl Installer {
             name: plan.name.clone(),
             version: plan.version.clone(),
             channel: plan.channel,
+            kind,
             phase: JobPhase::Queued,
             progress: None,
         };
@@ -175,17 +197,18 @@ impl Installer {
         );
         drop(slots);
         let _ = self.inner.changes.send(job.clone());
-        tracing::info!(product = %plan.product_id, version = %plan.version, "install queued");
+        tracing::info!(product = %plan.product_id, version = %plan.version, ?kind, "job queued");
 
         let inner = self.inner.clone();
-        tokio::spawn(async move { inner.run(plan, generation, stop_rx).await });
+        tokio::spawn(async move { inner.run(plan, kind, generation, stop_rx).await });
         Ok(job)
     }
 
     /// Finds downloads a previous run of the app left in the staging
     /// folders of `install_dirs`, deleting ones untouched for longer than
-    /// `max_age`. List the ones worth keeping with [`Installer::restore`]
-    /// and drop the rest with [`Installer::discard`].
+    /// `max_age`, and finishes updates a crash interrupted. List the ones
+    /// worth keeping with [`Installer::restore`] and drop the rest with
+    /// [`Installer::discard`].
     pub async fn find_interrupted(
         &self,
         install_dirs: Vec<PathBuf>,
@@ -234,7 +257,11 @@ impl Installer {
     pub async fn discard(&self, found: Interrupted) {
         tracing::info!(product = %found.job.product_id, version = %found.job.version, "discarding an outdated interrupted download");
         let staging = found.staging;
-        let _ = tokio::task::spawn_blocking(move || staging.discard_download()).await;
+        let _ = tokio::task::spawn_blocking(move || {
+            staging.discard_download();
+            depot::discard(&staging);
+        })
+        .await;
     }
 
     /// Stops a job and keeps its download for a later resume.
@@ -314,6 +341,83 @@ impl Installer {
     }
 }
 
+/// One job's handle on the installer, for the pipelines.
+pub(crate) struct Ctx<'a> {
+    inner: &'a Inner,
+    id: &'a str,
+    generation: u64,
+}
+
+impl Ctx<'_> {
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.inner.http
+    }
+
+    pub(crate) fn phase(&self, phase: JobPhase) {
+        self.inner.update(self.id, self.generation, |s| {
+            s.job.phase = phase;
+            s.job.progress = None;
+        });
+    }
+
+    /// A progress callback that broadcasts at most every
+    /// [`PROGRESS_EVERY`], with the recent throughput.
+    pub(crate) fn reporter(&self) -> impl FnMut(u64, Option<u64>) + Send + '_ {
+        let mut last = None::<Instant>;
+        let mut rate = Rate::default();
+        move |done, total| {
+            let due = last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY)
+                || total.is_some_and(|t| done >= t);
+            if due {
+                last = Some(Instant::now());
+                let rate = rate.sample(done);
+                self.inner.update(self.id, self.generation, |s| {
+                    s.job.progress = Some(Progress { done, total, rate });
+                });
+            }
+        }
+    }
+
+    pub(crate) async fn acquire_download(&self, stop: &mut StopRx) -> Result<SemaphorePermit<'_>> {
+        acquire(&self.inner.downloads, stop).await
+    }
+
+    pub(crate) async fn acquire_install(&self, stop: &mut StopRx) -> Result<SemaphorePermit<'_>> {
+        acquire(&self.inner.installs, stop).await
+    }
+}
+
+/// Bytes per second over the last [`RATE_WINDOW`].
+#[derive(Debug, Default)]
+struct Rate {
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl Rate {
+    fn sample(&mut self, done: u64) -> Option<u64> {
+        let now = Instant::now();
+        if self.samples.back().is_some_and(|&(_, d)| d > done) {
+            self.samples.clear();
+        }
+        self.samples.push_back((now, done));
+        while self
+            .samples
+            .front()
+            .is_some_and(|&(t, _)| now.duration_since(t) > RATE_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        let &(t0, d0) = self.samples.front()?;
+        let elapsed = now.duration_since(t0).as_secs_f64();
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss
+        )]
+        (elapsed >= 1.0).then(|| ((done - d0) as f64 / elapsed) as u64)
+    }
+}
+
 impl Inner {
     fn slots(&self) -> MutexGuard<'_, HashMap<ProductId, Slot>> {
         self.slots
@@ -335,35 +439,9 @@ impl Inner {
         let _ = self.changes.send(job);
     }
 
-    fn set_phase(&self, id: &str, generation: u64, phase: JobPhase) {
-        self.update(id, generation, |s| {
-            s.job.phase = phase;
-            s.job.progress = None;
-        });
-    }
-
-    /// A progress callback that broadcasts at most every [`PROGRESS_EVERY`].
-    fn reporter<'a>(
-        &'a self,
-        id: &'a str,
-        generation: u64,
-    ) -> impl FnMut(u64, Option<u64>) + Send + 'a {
-        let mut last = None::<Instant>;
-        move |done, total| {
-            let due = last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY)
-                || total.is_some_and(|t| done >= t);
-            if due {
-                last = Some(Instant::now());
-                self.update(id, generation, |s| {
-                    s.job.progress = Some(Progress { done, total });
-                });
-            }
-        }
-    }
-
-    async fn run(self: Arc<Self>, plan: Plan, generation: u64, mut stop: StopRx) {
+    async fn run(self: Arc<Self>, plan: Plan, kind: JobKind, generation: u64, mut stop: StopRx) {
         let id = plan.product_id.as_str();
-        let result = self.pipeline(&plan, generation, &mut stop).await;
+        let result = self.pipeline(&plan, kind, generation, &mut stop).await;
         let staging = self
             .slots()
             .get(id)
@@ -383,22 +461,22 @@ impl Inner {
         };
         match result {
             Ok(()) => {
-                tracing::info!(product = id, version = %plan.version, "installed");
+                tracing::info!(product = id, version = %plan.version, ?kind, "job done");
                 cleanup(true).await;
                 self.finish(id, generation, JobPhase::Completed);
             }
             Err(Error::Stopped(Stop::Pause)) => {
-                tracing::info!(product = id, "install paused");
+                tracing::info!(product = id, "job paused");
                 cleanup(false).await;
                 self.update(id, generation, |s| s.job.phase = JobPhase::Paused);
             }
             Err(Error::Stopped(Stop::Cancel)) => {
-                tracing::info!(product = id, "install cancelled");
+                tracing::info!(product = id, "job cancelled");
                 cleanup(true).await;
                 self.finish(id, generation, JobPhase::Cancelled);
             }
             Err(e) => {
-                tracing::warn!(product = id, error = %e, "install failed");
+                tracing::warn!(product = id, error = %e, "job failed");
                 cleanup(false).await;
                 let error = IpcError::from(e);
                 self.update(id, generation, |s| s.job.phase = JobPhase::Failed { error });
@@ -424,69 +502,50 @@ impl Inner {
         }
     }
 
-    async fn pipeline(&self, plan: &Plan, generation: u64, stop: &mut StopRx) -> Result<()> {
+    async fn pipeline(
+        &self,
+        plan: &Plan,
+        kind: JobKind,
+        generation: u64,
+        stop: &mut StopRx,
+    ) -> Result<()> {
         let id = plan.product_id.as_str();
         let install_dir = plan.install_dir.clone();
+        let depot_release = matches!(plan.source, Source::Depot(_));
         let staging = tokio::task::spawn_blocking({
             let id = id.to_owned();
-            move || Staging::create(&install_dir, &id)
+            move || -> Result<Staging> {
+                let staging = Staging::create(&install_dir, &id)?;
+                // Whatever format the last job used, an update it left half
+                // committed is finished first.
+                depot::recover(&staging);
+                // Leftovers of the other format would never resume.
+                if depot_release {
+                    staging.discard_download();
+                    staging.clear_work();
+                } else {
+                    depot::discard(&staging);
+                }
+                Ok(staging)
+            }
         })
         .await
         .map_err(|e| Error::Internal(e.to_string()))??;
         self.update(id, generation, |s| s.staging = Some(staging.clone()));
 
-        let manifest = match &plan.manifest_url {
-            Some(url) => Some(self.fetch_manifest(url, stop).await?),
-            None => {
-                tracing::warn!(
-                    product = id,
-                    "no package manifest; relying on zip checksums"
-                );
-                None
-            }
+        let ctx = Ctx {
+            inner: self,
+            id,
+            generation,
         };
-        let manifest = manifest.map(Arc::new);
-
-        let mut attempt = 1;
-        loop {
-            let attempted = async {
-                self.download(plan, &staging, manifest.as_deref(), generation, stop)
-                    .await?;
-                self.extract_and_check(plan, &staging, manifest.clone(), generation, stop)
-                    .await
-            };
-            match attempted.await {
-                Ok(()) => break,
-                Err(e @ (Error::Archive(_) | Error::Checksum { .. })) if attempt < ATTEMPTS => {
-                    tracing::warn!(product = id, error = %e, "package damaged, downloading again");
-                    download::forget(&staging).await;
-                    attempt += 1;
-                }
-                Err(e) => {
-                    if matches!(e, Error::Archive(_) | Error::Checksum { .. }) {
-                        download::forget(&staging).await;
-                    }
-                    return Err(e);
-                }
+        match &plan.source {
+            Source::Archive(source) => {
+                archive::run(&ctx, plan, source, kind, &staging, stop).await?
             }
+            Source::Depot(source) => depot::run(&ctx, plan, source, kind, &staging, stop).await?,
         }
 
-        self.set_phase(id, generation, JobPhase::Installing);
-        let permit = acquire(&self.installs, stop).await?;
         let target = plan.install_dir.join(&plan.package_dir_name);
-        let staged = staging.extract();
-        let marker = inspect::marker_json(&plan.version, &plan.package_dir_name);
-        let swap_target = target.clone();
-        let swap_staging = staging.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let marker_path = staged.join(inspect::MARKER_FILE);
-            std::fs::write(&marker_path, marker).at(&marker_path)?;
-            swap::install(&staged, &swap_target, &swap_staging)
-        })
-        .await
-        .map_err(|e| Error::Internal(e.to_string()))??;
-        drop(permit);
-
         let record = InstalledPackage {
             product_id: plan.product_id.clone(),
             version: Some(plan.version.clone()),
@@ -494,163 +553,32 @@ impl Inner {
             package_dir_name: plan.package_dir_name.clone(),
             installed_at: Some(unix_now()),
         };
+        // A verify of an already-current package keeps its install time.
+        let keep = match (kind, self.registry.get(&plan.product_id).await) {
+            (JobKind::Verify, Ok(Some(existing))) if existing.version == record.version => {
+                Some(existing)
+            }
+            _ => None,
+        };
         // The package is in place either way; a rescan repairs the record.
-        if let Err(e) = self.registry.upsert(record).await {
+        if let Err(e) = self.registry.upsert(keep.unwrap_or(record)).await {
             tracing::error!(product = id, error = %e, "installed but could not record it");
         }
         Ok(())
     }
-
-    async fn download(
-        &self,
-        plan: &Plan,
-        staging: &Staging,
-        manifest: Option<&Manifest>,
-        generation: u64,
-        stop: &mut StopRx,
-    ) -> Result<()> {
-        let id = plan.product_id.as_str();
-        let archive = manifest.and_then(|m| m.archive.as_ref());
-        let _permit = acquire(&self.downloads, stop).await?;
-        self.set_phase(id, generation, JobPhase::Downloading);
-        let source = download::Source {
-            url: &plan.archive_url,
-            version: &plan.version,
-            size: archive.map(|a| a.size),
-            record: download::Record {
-                product_id: plan.product_id.clone(),
-                name: plan.name.clone(),
-                channel: plan.channel,
-                package_dir_name: plan.package_dir_name.clone(),
-                install_dir: plan.install_dir.clone(),
-                format: plan.format,
-                archive_key: plan.archive_key.clone(),
-            },
-        };
-        download::fetch(
-            &self.http,
-            staging,
-            &source,
-            stop,
-            &mut self.reporter(id, generation),
-        )
-        .await?;
-
-        let Some(expected) = archive.cloned() else {
-            return Ok(());
-        };
-        self.set_phase(id, generation, JobPhase::Verifying);
-        let path = staging.download();
-        let total = expected.size;
-        let actual = job::blocking(stop, &mut self.reporter(id, generation), move |p| {
-            p.total.store(total, std::sync::atomic::Ordering::Relaxed);
-            manifest::digest_with_progress(
-                &path,
-                |n| p.done.store(n, std::sync::atomic::Ordering::Relaxed),
-                || p.stop.load(std::sync::atomic::Ordering::Relaxed),
-            )
-            .at(&path)
-        })
-        .await?;
-        if actual != expected {
-            download::forget(staging).await;
-            return Err(Error::Checksum {
-                expected: expected.sha256,
-                actual: actual.sha256,
-            });
-        }
-        Ok(())
-    }
-
-    async fn extract_and_check(
-        &self,
-        plan: &Plan,
-        staging: &Staging,
-        manifest: Option<Arc<Manifest>>,
-        generation: u64,
-        stop: &mut StopRx,
-    ) -> Result<()> {
-        let id = plan.product_id.as_str();
-        let _permit = acquire(&self.installs, stop).await?;
-        self.set_phase(id, generation, JobPhase::Extracting);
-        let archive = staging.download();
-        let dest = staging.extract();
-        let scratch = staging.scratch();
-        let format = plan.format;
-        let size_hint = manifest.as_deref().map(Manifest::total_size);
-        job::blocking(stop, &mut self.reporter(id, generation), move |progress| {
-            staging::remove_dir(&dest);
-            let target = extract::Target {
-                dest: &dest,
-                scratch: &scratch,
-                size_hint,
-            };
-            let Some(written) = extract::extract(format, &archive, target, progress)? else {
-                return Ok(None);
-            };
-            if let Some(manifest) = manifest {
-                let problems = manifest.compare(&written);
-                if !problems.is_empty() {
-                    return Err(damaged(&problems));
-                }
-            }
-            Ok(Some(()))
-        })
-        .await
-    }
-
-    async fn fetch_manifest(&self, url: &Url, stop: &mut StopRx) -> Result<Manifest> {
-        let request = async {
-            let response = self.http.get(url.clone()).send().await?;
-            if !response.status().is_success() {
-                return Err(Error::Http(response.status()));
-            }
-            let manifest: Manifest = response
-                .json()
-                .await
-                .map_err(|e| Error::Archive(format!("the package manifest is unreadable: {e}")))?;
-            if manifest.schema_version > manifest::SCHEMA_VERSION {
-                return Err(Error::Archive(format!(
-                    "the package manifest is format {}; update the manager",
-                    manifest.schema_version
-                )));
-            }
-            Ok(manifest)
-        };
-        tokio::select! {
-            result = request => result,
-            stop = job::stopped(stop) => Err(Error::Stopped(stop)),
-        }
-    }
 }
 
-async fn acquire<'a>(
-    semaphore: &'a Semaphore,
-    stop: &mut StopRx,
-) -> Result<tokio::sync::SemaphorePermit<'a>> {
+async fn acquire<'a>(semaphore: &'a Semaphore, stop: &mut StopRx) -> Result<SemaphorePermit<'a>> {
     tokio::select! {
         permit = semaphore.acquire() => permit.map_err(|e| Error::Internal(e.to_string())),
         stop = job::stopped(stop) => Err(Error::Stopped(stop)),
     }
 }
 
-fn damaged(problems: &[manifest::Discrepancy]) -> Error {
-    let mut listed: Vec<String> = problems
-        .iter()
-        .take(MAX_LISTED_PROBLEMS)
-        .map(ToString::to_string)
-        .collect();
-    if problems.len() > MAX_LISTED_PROBLEMS {
-        listed.push(format!("and {} more", problems.len() - MAX_LISTED_PROBLEMS));
-    }
-    Error::Archive(format!(
-        "it does not match the package manifest: {}",
-        listed.join(", ")
-    ))
-}
-
 fn validate(plan: &Plan) -> IpcResult<()> {
-    if plan.format == ArchiveFormat::Unknown {
+    if let Source::Archive(a) = &plan.source
+        && a.format == ArchiveFormat::Unknown
+    {
         return Err(IpcError::unsupported(format!(
             "{} uses an archive format this version cannot install; update the manager",
             plan.name
@@ -693,5 +621,9 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+#[cfg(test)]
+mod depot_tests;
+#[cfg(test)]
+mod presets_tests;
 #[cfg(test)]
 mod tests;

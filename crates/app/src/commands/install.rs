@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
-use infinity_installer::{Installer, Interrupted, KEEP_INTERRUPTED_FOR, Plan, Wanted};
+use infinity_installer::{
+    ArchiveSource, DepotSource, Installer, Interrupted, KEEP_INTERRUPTED_FOR, PackUrls, Plan,
+    Source, Wanted,
+};
 use infinity_ipc::catalog::{ArchiveFormat, PresignArtifact, Product};
 use infinity_ipc::commands as cmd;
-use infinity_ipc::dto::{Channel, ProductRef, livery_job_id, parse_livery_job_id};
+use infinity_ipc::dto::{Channel, InstallRequest, ProductRef, livery_job_id, parse_livery_job_id};
 use infinity_ipc::events::InstalledChanged;
 use infinity_ipc::{IpcError, IpcErrorCode, IpcResult};
 use infinity_persistence::{InstalledStore, PreferencesStore};
+use infinity_providers::ContentProvider;
 use tauri::{Manager, State};
 
 use super::{Args, Out};
@@ -96,9 +100,29 @@ pub(crate) async fn install_start(
     installer: State<'_, Installer>,
     args: Args<cmd::InstallStart>,
 ) -> Out<cmd::InstallStart> {
+    let plan = request_plan(&state, &prefs, &args).await?;
+    installer.start(plan)
+}
+
+/// Checks an installed product file by file and repairs it.
+#[tauri::command]
+pub(crate) async fn install_verify(
+    state: State<'_, AppState>,
+    prefs: State<'_, PreferencesStore>,
+    installer: State<'_, Installer>,
+    args: Args<cmd::InstallVerify>,
+) -> Out<cmd::InstallVerify> {
+    let plan = request_plan(&state, &prefs, &args).await?;
+    installer.verify(plan)
+}
+
+async fn request_plan(
+    state: &AppState,
+    prefs: &PreferencesStore,
+    args: &InstallRequest,
+) -> IpcResult<Plan> {
     if let Some((aircraft, livery)) = parse_livery_job_id(&args.product_id) {
-        let plan = livery_plan(&state, &prefs, aircraft, livery, args.channel).await?;
-        return installer.start(plan);
+        return livery_plan(state, prefs, aircraft, livery, args.channel).await;
     }
     // Fresh, so an update installs the version the user was just shown.
     state.fetch_catalog(args.channel).await?;
@@ -108,8 +132,7 @@ pub(crate) async fn install_start(
             channel: args.channel,
         })
         .await?;
-    let plan = plan(&state, &prefs, product, args.channel).await?;
-    installer.start(plan)
+    plan(state, prefs, product, args.channel).await
 }
 
 /// A livery installs like a product, from the presigned URL in the
@@ -160,14 +183,16 @@ async fn livery_plan(
         name: livery.name,
         version: livery.version,
         channel,
-        archive_url,
-        archive_key: livery.archive_key,
-        // The livery catalog has no format field; liveries are zips. A
-        // file that is not one fails clearly at extraction.
-        format: ArchiveFormat::Zip,
-        manifest_url: None,
         package_dir_name: livery.package_dir_name,
         install_dir,
+        source: Source::Archive(ArchiveSource {
+            url: archive_url,
+            key: livery.archive_key,
+            // The livery catalog has no format field; liveries are zips. A
+            // file that is not one fails clearly at extraction.
+            format: ArchiveFormat::Zip,
+            manifest_url: None,
+        }),
     })
 }
 
@@ -216,6 +241,58 @@ async fn plan(
             ))
         })?
         .to_owned();
+    let prefs = prefs.load().await?;
+    let locator = paths::locate(&prefs).await?;
+    let install_dir = paths::require_install_dir(&prefs, &locator)?;
+
+    let content = &state.providers.content;
+    let source = match depot_release(&product) {
+        Some(manifest_hash) => {
+            let manifest_url = content
+                .resolve_download(&product, PresignArtifact::DepotManifest)
+                .await?
+                .url;
+            Source::Depot(DepotSource {
+                manifest_url,
+                manifest_hash,
+                packs: Arc::new(ProviderPacks {
+                    content: content.clone(),
+                    product: product.clone(),
+                }),
+            })
+        }
+        None => Source::Archive(archive_source(content.as_ref(), &product).await?),
+    };
+    Ok(Plan {
+        product_id: product.id,
+        name: product.name,
+        version: product.version,
+        channel,
+        package_dir_name,
+        install_dir,
+        source,
+    })
+}
+
+/// The depot manifest hash, when the product has a chunked release this
+/// build can read. Otherwise the archive is used.
+fn depot_release(product: &Product) -> Option<infinity_depot::Hash> {
+    let depot = product.package.depot()?;
+    if depot.schema > infinity_depot::manifest::SCHEMA_VERSION {
+        tracing::info!(product = %product.id, schema = depot.schema, "depot release too new for this build; using the archive");
+        return None;
+    }
+    let hash = infinity_depot::Hash::from_hex(&depot.manifest_hash);
+    if hash.is_none() {
+        tracing::warn!(product = %product.id, "depot release has a malformed manifest hash; using the archive");
+    }
+    hash
+}
+
+async fn archive_source(
+    content: &dyn ContentProvider,
+    product: &Product,
+) -> IpcResult<ArchiveSource> {
     let archive = product.package.archive().clone();
     if archive.format == ArchiveFormat::Unknown {
         return Err(IpcError::unsupported(format!(
@@ -223,14 +300,8 @@ async fn plan(
             product.name
         )));
     }
-
-    let prefs = prefs.load().await?;
-    let locator = paths::locate(&prefs).await?;
-    let install_dir = paths::require_install_dir(&prefs, &locator)?;
-
-    let content = &state.providers.content;
-    let archive_url = content
-        .resolve_download(&product, PresignArtifact::Archive)
+    let url = content
+        .resolve_download(product, PresignArtifact::Archive)
         .await?
         .url;
     // A declared manifest is required: installing unchecked because it
@@ -238,24 +309,39 @@ async fn plan(
     let manifest_url = match product.package.manifest_key() {
         Some(_) => Some(
             content
-                .resolve_download(&product, PresignArtifact::Manifest)
+                .resolve_download(product, PresignArtifact::Manifest)
                 .await?
                 .url,
         ),
         None => None,
     };
-    Ok(Plan {
-        product_id: product.id,
-        name: product.name,
-        version: product.version,
-        channel,
-        archive_url,
-        archive_key: archive.key,
+    Ok(ArchiveSource {
+        url,
+        key: archive.key,
         format: archive.format,
         manifest_url,
-        package_dir_name,
-        install_dir,
     })
+}
+
+/// Pack URLs from the content provider: presigned by the Worker in the
+/// official build, under the public artifact base otherwise.
+#[derive(Debug)]
+struct ProviderPacks {
+    content: Arc<dyn ContentProvider>,
+    product: Product,
+}
+
+#[async_trait::async_trait]
+impl PackUrls for ProviderPacks {
+    async fn resolve(&self, keys: &[String]) -> IpcResult<Vec<url::Url>> {
+        Ok(self
+            .content
+            .resolve_depot_packs(&self.product, keys)
+            .await?
+            .into_iter()
+            .map(|d| d.url)
+            .collect())
+    }
 }
 
 /// Lists downloads a previous run left unfinished as paused jobs. The
