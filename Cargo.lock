@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-app"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2648,7 +2648,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-auth"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-bridge"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "axum",
  "futures-util",
@@ -2709,7 +2709,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-configurator"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "serde",
@@ -2722,7 +2722,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-depot"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "blake3",
  "rayon",
@@ -2735,7 +2735,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-efb-server"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-flir-engine"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "base64 0.22.1",
  "flir-pipeline",
@@ -2782,7 +2782,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-installer"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "fs4",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-ipc"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2825,7 +2825,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-link-server"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "axum",
  "futures-util",
@@ -2838,7 +2838,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-manager"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-app",
  "infinity-navigraph",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-manager-ui"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "console_error_panic_hook",
  "infinity-ipc",
@@ -2874,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-nav-db"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "infinity-sim-paths",
@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-navigraph"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2908,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-netdiag"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "httpdate",
  "reqwest 0.12.28",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-persistence"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "serde",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-providers"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-trait",
  "infinity-ipc",
@@ -2948,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-sim-paths"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "tempfile",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-sim-tools"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "base64 0.22.1",
  "flir-stream",
@@ -2980,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-sim-tools-ipc"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "serde",
@@ -2989,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-sim-watch"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "sysinfo",
@@ -2999,7 +2999,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-simbrief"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "reqwest 0.12.28",
@@ -3013,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-supervisor"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "sha2",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "infinity-terrain"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "infinity-ipc",
  "infinity-terrain-radar",
@@ -8038,7 +8038,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde_json",
 ]
