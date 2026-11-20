@@ -331,6 +331,23 @@ mod worker {
     };
     use tracing::warn;
 
+    /// Copies the viewports bridge's log ring (written inside the sim by the
+    /// injected DLL) into the manager's log under target `flir::viewports`,
+    /// so a tester's one log file carries both sides. The ring holds the
+    /// lines since the last drain; one call per tick keeps up with it.
+    fn forward_bridge_logs(sim: &Sim) {
+        for line in sim.drain_logs() {
+            let (seq, tag, msg) = (line.seq, line.tag.as_str(), line.msg.as_str());
+            match line.level {
+                0 => tracing::trace!(target: "flir::viewports", seq, tag, "{msg}"),
+                1 => tracing::debug!(target: "flir::viewports", seq, tag, "{msg}"),
+                2 => tracing::info!(target: "flir::viewports", seq, tag, "{msg}"),
+                3 => tracing::warn!(target: "flir::viewports", seq, tag, "{msg}"),
+                _ => tracing::error!(target: "flir::viewports", seq, tag, "{msg}"),
+            }
+        }
+    }
+
     /// The nose colour target's format and occurrence (R11G11B10, first).
     const COLOR_FORMAT: u32 = decode::DXGI_R11G11B10_FLOAT;
     const ATTACH_RETRY: Duration = Duration::from_secs(3);
@@ -504,6 +521,11 @@ mod worker {
         fn release(&mut self, reason: Release) {
             let pid = self.sim_pid();
             let session = self.session.take();
+            // The bridge's last words (teardown, or what it saw before the
+            // sim died) are still in the mapping: log them before it goes.
+            if let Some(s) = &session {
+                forward_bridge_logs(&s.sim);
+            }
             {
                 let mut d = lock(&self.shared.diag);
                 d.state = FlirState::Releasing;
@@ -790,6 +812,7 @@ mod worker {
             let Some(s) = self.session.as_mut() else {
                 return;
             };
+            forward_bridge_logs(&s.sim);
 
             // A dead bridge (sim closed or crashed) drops the session.
             if let Ok(st) = s.sim.status() {
