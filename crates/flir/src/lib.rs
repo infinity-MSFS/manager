@@ -390,6 +390,11 @@ mod worker {
         fps_window: (Instant, u32),
         /// Re-injections for a lost nose view that did not bring it back.
         nose_resets: u32,
+        /// A sim whose bridge stopped responding. Nothing is injected into it
+        /// again: the one time the manager re-injected into such a sim
+        /// (beta, 20 Nov 2026) the sim crashed to desktop seconds later.
+        /// Cleared by the sim exiting (a new pid).
+        quarantined: Option<u32>,
     }
 
     pub(super) fn run(shared: &Shared, tx: &watch::Sender<Option<Arc<Frame>>>) {
@@ -404,6 +409,7 @@ mod worker {
             seq: first_seq(),
             fps_window: (Instant::now(), 0),
             nose_resets: 0,
+            quarantined: None,
         };
         while !shared.stopping() {
             w.step();
@@ -574,7 +580,15 @@ mod worker {
                 let _ = infinity_viewports_host::signal_nose_teardown(pid);
                 wait_gone(pid, dlls::CORE_DLL)
             };
-            let bridge_gone = !bridge_in || {
+            // The bridge stays for the sim's lifetime: its hooks idle at the
+            // cost of an atomic load, and the next attach reconnects to it. A
+            // SECOND install of its hooks into a live sim hung the bridge and
+            // the sim crashed (beta, 20 Nov 2026); the first install is the
+            // only one that has ever been proven. Only a different build
+            // takes it out — and a stalled one is never told anything, since
+            // a queued teardown it acted on later would unhook mid-frame.
+            let unload_bridge = bridge_in && reason == Release::Rebuilt;
+            let bridge_gone = !unload_bridge || {
                 match &sim {
                     Some(sim) => {
                         let _ = sim.teardown_bridge();
@@ -587,11 +601,19 @@ mod worker {
                 drop(sim);
                 wait_gone(pid, dlls::BRIDGE_DLL)
             };
-            let outcome = match (core_gone, bridge_gone) {
-                (true, true) => "unloaded",
-                (false, true) => "the core did not unload",
-                (true, false) => "the bridge did not unload",
-                (false, false) => "neither DLL unloaded",
+            if reason == Release::Stalled || !bridge_gone {
+                self.quarantined = Some(pid);
+                warn!(
+                    pid,
+                    "flir: the viewports bridge is stuck in this sim; FLIR disabled until the sim restarts"
+                );
+            }
+            let outcome = match (core_gone, bridge_in && !unload_bridge, bridge_gone) {
+                (false, _, true) => "the core did not unload",
+                (false, _, false) => "neither DLL unloaded",
+                (true, _, false) => "the bridge did not unload",
+                (true, true, true) => "core unloaded; bridge left resident",
+                (true, false, true) => "unloaded",
             };
             if !(core_gone && bridge_gone) {
                 warn!(pid, outcome, "flir: unload incomplete");
@@ -651,6 +673,20 @@ mod worker {
                 return false;
             };
             let pid = proc.pid;
+            match self.quarantined {
+                Some(q) if q == pid => {
+                    self.set_state(
+                        FlirState::Error,
+                        Some(
+                            "FLIR unavailable: its bridge stopped responding in this sim session.                              Restart the sim to use it again."
+                                .into(),
+                        ),
+                    );
+                    return false;
+                }
+                Some(_) => self.quarantined = None,
+                None => {}
+            }
 
             let root = shadow::root(dir);
             let staged = shadow::stage(&bridge_src, &root)
