@@ -76,16 +76,33 @@ impl PkceIdentity {
                 return SessionState::SignedOut;
             }
         };
-        match self
-            .establish(wire::refresh(&self.http, &self.cfg, &refresh_token).await)
-            .await
-        {
-            Ok(state) => state,
-            Err(e) => {
+        let tokens = match wire::refresh(&self.http, &self.cfg, &refresh_token).await {
+            Ok(tokens) => tokens,
+            // Only the identity provider turning the token down ends the
+            // session. Offline, a timeout or a 5xx says nothing about it.
+            Err(e) if e.code == IpcErrorCode::AuthExpired => {
                 tracing::info!(code = %e.code, "stored session no longer valid");
                 if let Err(e) = self.store.clear() {
                     tracing::warn!(error = %e, "could not clear stored session");
                 }
+                return SessionState::SignedOut;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not restore session; keeping it for next launch");
+                return SessionState::SignedOut;
+            }
+        };
+        // Rotation has spent the stored token: keep its replacement before
+        // anything else can fail.
+        if let Some(rt) = &tokens.refresh_token
+            && let Err(e) = self.store.save(rt)
+        {
+            tracing::warn!(error = %e, "could not store rotated session");
+        }
+        match self.establish(Ok(tokens)).await {
+            Ok(state) => state,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not restore session; keeping it for next launch");
                 SessionState::SignedOut
             }
         }
@@ -224,6 +241,13 @@ impl PkceIdentity {
         };
         let refresh_token = refresh_token
             .ok_or_else(|| IpcError::new(IpcErrorCode::AuthRequired, "not signed in"))?;
+        // Another process sharing the store may have rotated the token
+        // since we read it; ours would then be a reuse. The store has the
+        // newest.
+        let refresh_token = match self.store.load() {
+            Ok(Some(stored)) => stored,
+            _ => refresh_token,
+        };
 
         let tokens = wire::refresh(&self.http, &self.cfg, &refresh_token).await?;
         let mut state = self.state.lock().await;
@@ -317,6 +341,16 @@ mod tests {
     /// A token endpoint that counts refreshes and answers each with a new
     /// rotated refresh token, after a delay so callers overlap.
     fn token_server() -> (url::Url, Arc<std::sync::atomic::AtomicUsize>) {
+        let (url, hits, _requests) = recording_token_server();
+        (url, hits)
+    }
+
+    /// [`token_server`], also keeping each request as it was received.
+    fn recording_token_server() -> (
+        url::Url,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
         use std::io::{Read, Write};
         use std::sync::atomic::Ordering;
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -324,12 +358,24 @@ mod tests {
         let url = url::Url::parse(&format!("http://{addr}/oauth/token")).unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = hits.clone();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { return };
                 let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                // The form may arrive after the headers.
+                let mut request = String::new();
                 let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
+                while !request.contains("grant_type=") {
+                    match stream.read(&mut buf) {
+                        Ok(read) if read > 0 => {
+                            request.push_str(&String::from_utf8_lossy(&buf[..read]));
+                        }
+                        _ => break,
+                    }
+                }
+                seen.lock().unwrap().push(request);
                 std::thread::sleep(Duration::from_millis(150));
                 let body = format!(
                     r#"{{"access_token":"access-{n}","refresh_token":"refresh-{n}","expires_in":3600}}"#
@@ -341,7 +387,55 @@ mod tests {
                 );
             }
         });
-        (url, hits)
+        (url, hits, requests)
+    }
+
+    /// A second launch restores the session (rotating the stored token)
+    /// and hands over to the running instance, whose own copy is now spent.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_spends_the_token_another_process_stored() {
+        let (token_url, _hits, requests) = recording_token_server();
+        let mut p = provider();
+        p.cfg.endpoints.token = token_url;
+        p.state.lock().await.tokens = Some(expired("spent-here"));
+        p.store.save("rotated-elsewhere").unwrap();
+
+        assert_eq!(p.access_token().await.unwrap().expose(), "access-1");
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains("refresh_token=rotated-elsewhere"));
+        assert!(!requests[0].contains("spent-here"));
+    }
+
+    /// A status-only endpoint: every request gets `status` and no tokens.
+    fn failing_token_server(status: &'static str) -> url::Url {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+            }
+        });
+        url::Url::parse(&format!("http://{addr}/oauth/token")).unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_keeps_the_session_unless_it_was_rejected() {
+        let mut p = provider();
+        p.cfg.endpoints.token = failing_token_server("503 Service Unavailable");
+        p.store.save("refresh-0").unwrap();
+        assert_eq!(p.restore().await, SessionState::SignedOut);
+        assert_eq!(p.store.load().unwrap().as_deref(), Some("refresh-0"));
+
+        p.cfg.endpoints.token = failing_token_server("403 Forbidden");
+        assert_eq!(p.restore().await, SessionState::SignedOut);
+        assert_eq!(p.store.load().unwrap(), None);
     }
 
     fn expired(refresh: &str) -> Tokens {

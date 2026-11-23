@@ -75,9 +75,16 @@ async fn token_request(
         .map_err(network)?;
     let status = resp.status();
     if !status.is_success() {
+        // 400/401/403 are the grant being turned down. Anything else (429,
+        // 5xx) is the endpoint having trouble, and the grant may be fine.
+        let code = match status.as_u16() {
+            400 | 401 | 403 => rejected,
+            429 => IpcErrorCode::RateLimited,
+            _ => IpcErrorCode::NetworkUnreachable,
+        };
         let body = resp.text().await.unwrap_or_default();
         return Err(
-            IpcError::new(rejected, format!("token endpoint returned {status}"))
+            IpcError::new(code, format!("token endpoint returned {status}"))
                 .with_details(serde_json::json!({ "body": body })),
         );
     }
