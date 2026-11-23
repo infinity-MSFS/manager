@@ -4,6 +4,7 @@ mod bridge;
 mod catalog;
 mod configurator;
 mod efb;
+mod equipment;
 pub(crate) mod install;
 pub(crate) mod migrate;
 pub(crate) mod nav;
@@ -71,6 +72,11 @@ handlers![
     bridge::bridge_ensure,
     bridge::bridge_status,
     bridge::bridge_command,
+    equipment::equipment_profile,
+    equipment::equipment_preset_save,
+    equipment::equipment_preset_delete,
+    equipment::equipment_preset_apply,
+    equipment::equipment_startup_set,
     nav::nav_cycle,
     nav::nav_is_valid_icao,
     nav::nav_runways,

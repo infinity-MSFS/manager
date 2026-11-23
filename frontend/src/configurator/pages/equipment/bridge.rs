@@ -1,6 +1,7 @@
 //! Live equipment over a catalog-declared bridge (v3
-//! `useBridgeEquipment.ts`). Nothing is persisted: the aircraft owns the
-//! fit. The gauge answers `equip_query` with a snapshot, applies
+//! `useBridgeEquipment.ts`). The aircraft owns the live fit; what persists
+//! between flights is the backend's (`crate::equipment` in `infinity-app`,
+//! and [`super::presets`] here). The gauge answers `equip_query` with a snapshot, applies
 //! `equip_cmd`, and pushes `equip_state` whenever the fit changes, so the
 //! page queries once and then follows the pushes. A cheap status poll only
 //! drives the badge and re-queries when the gauge comes up.
@@ -62,6 +63,20 @@ pub(super) struct Snapshot {
     pub swappable: bool,
     pub professional: bool,
     pub categories: Vec<EquipmentCategory>,
+    /// The chosen item in each selectable category, what a preset stores.
+    /// Empty from an aircraft too old to report it.
+    pub selection: Vec<u32>,
+}
+
+/// Categories from a cached layout (`VariantEquipment::layout`), leniently.
+pub(super) fn parse_categories(raw: &Value) -> Vec<EquipmentCategory> {
+    raw.as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A snapshot from the wire; `None` when it is not an object. Malformed
@@ -70,10 +85,15 @@ pub(super) fn parse_snapshot(raw: &Value) -> Option<Snapshot> {
     let o = raw.as_object()?;
     let categories = o
         .get("categories")
+        .map(parse_categories)
+        .unwrap_or_default();
+    let selection = o
+        .get("selection")
         .and_then(Value::as_array)
         .map(|a| {
             a.iter()
-                .filter_map(|c| serde_json::from_value(c.clone()).ok())
+                .filter_map(Value::as_u64)
+                .filter_map(|i| u32::try_from(i).ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -82,6 +102,7 @@ pub(super) fn parse_snapshot(raw: &Value) -> Option<Snapshot> {
         swappable: o.get("swappable").and_then(Value::as_bool) == Some(true),
         professional: o.get("professional").and_then(Value::as_bool) == Some(true),
         categories,
+        selection,
     })
 }
 
@@ -256,6 +277,15 @@ impl Equipment {
                 self.refresh().await;
             }
         });
+    }
+
+    /// Takes a snapshot an action other than ours answered with (a preset
+    /// load), as newer than any query in flight.
+    pub(super) fn accept(self, raw: &Value) {
+        if let Some(s) = parse_snapshot(raw) {
+            let _ = self.control.try_update_value(|c| c.generation += 1);
+            let _ = self.snapshot.try_set(Some(s));
+        }
     }
 
     /// Selects option `idx` within its category.

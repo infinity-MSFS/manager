@@ -103,6 +103,18 @@ define_commands! {
     /// Sends a command to the gauges on a bridge and returns their answer.
     bridge_command => BridgeCommandSend(dto::BridgeCommand) -> serde_json::Value;
 
+    /// The saved equipment (presets, last fits, startup choices) of a
+    /// bridge namespace. Empty when nothing is saved.
+    equipment_profile => EquipmentProfileGet(String) -> dto::EquipmentProfile;
+    /// Creates (empty `id`) or replaces a preset; returns the new profile.
+    equipment_preset_save => EquipmentPresetSaveCmd(dto::EquipmentPresetSave) -> dto::EquipmentProfile;
+    /// Deletes a preset, and any startup choice naming it.
+    equipment_preset_delete => EquipmentPresetDelete(dto::EquipmentPresetRef) -> dto::EquipmentProfile;
+    /// Loads a preset into the running aircraft; returns its new snapshot.
+    equipment_preset_apply => EquipmentPresetApply(dto::EquipmentPresetRef) -> serde_json::Value;
+    /// What a variant starts each flight with: a preset, or the last fit.
+    equipment_startup_set => EquipmentStartupSet(dto::EquipmentStartup) -> dto::EquipmentProfile;
+
     /// AIRAC cycle of the product's navigation database.
     nav_cycle => NavCycle(dto::ProductRef) -> String;
     nav_is_valid_icao => NavIsValidIcao(nav::NavAirport) -> bool;

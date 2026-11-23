@@ -5,6 +5,7 @@ mod efb;
 mod efb_browser;
 mod efb_docs;
 mod efb_presence;
+mod equipment;
 mod events;
 mod paths;
 mod presets;
@@ -127,6 +128,9 @@ impl Builder {
                 app.manage(infinity_configurator::ConfigStore::new(&app_data));
                 let bridges = infinity_bridge::BridgeManager::default();
                 forward_bridges(app.handle(), &bridges);
+                let equipment = Arc::new(infinity_persistence::EquipmentStore::new(&app_data));
+                equipment::start(app.handle(), &bridges, equipment.clone());
+                app.manage(equipment);
                 simbrief_gauge::serve(app.handle(), &bridges);
                 app.manage(infinity_simbrief::SimBriefClient::simbrief().map_err(|e| {
                     Box::new(infinity_ipc::IpcError::from(e)) as Box<dyn std::error::Error>

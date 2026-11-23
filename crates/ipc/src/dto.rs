@@ -726,3 +726,129 @@ mod tests {
         assert!(serde_json::to_value(&job).unwrap().get("kind").is_none());
     }
 }
+
+// ---------------- Equipment presets ----------------
+//
+// The saved equipment of one aircraft family, keyed by its bridge
+// namespace (`dc10`). The aircraft owns the LIVE fit (`equip_state` /
+// `equip_cmd` / `equip_apply` over the bridge); the manager owns what
+// persists between flights: the fit last flown on each variant, named
+// presets, and which of the two each variant starts with. Item indices are
+// the gauge's wire indices (`Equipment::ALL` order in `10-systems`).
+
+/// A named equipment fit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentPreset {
+    /// Assigned by the manager on first save; empty to create.
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    /// ATC MODEL of the variant it was saved on. A preset applies to any
+    /// variant, as far as that variant offers its items.
+    pub variant: String,
+    /// The selected item in each category.
+    pub items: Vec<u32>,
+    #[serde(default)]
+    pub updated_at_ms: u64,
+}
+
+/// What the manager remembers for one variant.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VariantEquipment {
+    /// ATC MODEL.
+    pub variant: String,
+    /// The fit last flown, saved on every change the user makes (from the
+    /// manager or the EFB). Restored at the start of the next flight unless
+    /// `startup` names a preset.
+    #[serde(default)]
+    pub last_fit: Option<Vec<u32>>,
+    /// A preset to start every flight with instead of the last fit.
+    #[serde(default)]
+    pub startup: Option<String>,
+    /// The aircraft's last `categories[]` for this variant, kept so presets
+    /// can be built with the sim closed.
+    #[serde(default)]
+    pub layout: Option<serde_json::Value>,
+    /// Whether `layout` was reported under the Professional gate.
+    #[serde(default)]
+    pub layout_professional: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentProfile {
+    #[serde(default)]
+    pub presets: Vec<EquipmentPreset>,
+    #[serde(default)]
+    pub variants: Vec<VariantEquipment>,
+}
+
+impl EquipmentProfile {
+    pub fn variant(&self, atc: &str) -> Option<&VariantEquipment> {
+        self.variants.iter().find(|v| v.variant == atc)
+    }
+
+    /// The variant's entry, created empty on first use.
+    pub fn variant_mut(&mut self, atc: &str) -> &mut VariantEquipment {
+        let i = match self.variants.iter().position(|v| v.variant == atc) {
+            Some(i) => i,
+            None => {
+                self.variants.push(VariantEquipment {
+                    variant: atc.to_owned(),
+                    ..VariantEquipment::default()
+                });
+                self.variants.len() - 1
+            }
+        };
+        &mut self.variants[i]
+    }
+
+    pub fn preset(&self, id: &str) -> Option<&EquipmentPreset> {
+        self.presets.iter().find(|p| p.id == id)
+    }
+
+    /// What a new flight of `atc` starts with: its startup preset if that
+    /// still exists, else its last fit. `None` when nothing is saved.
+    pub fn startup_items(&self, atc: &str) -> Option<Vec<u32>> {
+        let v = self.variant(atc)?;
+        v.startup
+            .as_deref()
+            .and_then(|id| self.preset(id))
+            .map(|p| p.items.clone())
+            .or_else(|| v.last_fit.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentPresetSave {
+    pub namespace: String,
+    pub preset: EquipmentPreset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentPresetRef {
+    pub namespace: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentStartup {
+    pub namespace: String,
+    pub variant: String,
+    /// `None`: start with the last fit flown.
+    pub preset_id: Option<String>,
+}
+
+/// A namespace's profile changed (a save, or the aircraft reporting a new
+/// fit or layout).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EquipmentProfileChanged {
+    pub namespace: String,
+    pub profile: EquipmentProfile,
+}
