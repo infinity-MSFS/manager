@@ -1,3 +1,4 @@
+mod acars;
 mod boot;
 mod commands;
 mod deep_link;
@@ -131,6 +132,11 @@ impl Builder {
                 let equipment = Arc::new(infinity_persistence::EquipmentStore::new(&app_data));
                 equipment::start(app.handle(), &bridges, equipment.clone());
                 app.manage(equipment);
+                acars::start(
+                    app.handle(),
+                    &bridges,
+                    Arc::new(infinity_persistence::AcarsStore::new(&app_data)),
+                );
                 simbrief_gauge::serve(app.handle(), &bridges);
                 app.manage(infinity_simbrief::SimBriefClient::simbrief().map_err(|e| {
                     Box::new(infinity_ipc::IpcError::from(e)) as Box<dyn std::error::Error>
